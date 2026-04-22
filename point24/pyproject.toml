@@ -1,0 +1,10 @@
+[project]
+name = "terminal-point24"
+version = "0.1.0"
+description = "A terminal 24-point puzzle game."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false

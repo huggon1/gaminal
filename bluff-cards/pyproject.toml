@@ -1,0 +1,10 @@
+[project]
+name = "terminal-bluff-cards"
+version = "0.1.0"
+description = "A terminal bluff card game for Linux."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false

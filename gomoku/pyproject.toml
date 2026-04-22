@@ -1,0 +1,10 @@
+[project]
+name = "terminal-gomoku"
+version = "0.1.0"
+description = "A standard-library-only terminal gomoku implementation for Linux."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
