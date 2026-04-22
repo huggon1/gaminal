@@ -1,353 +1,217 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
+
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Button, Static
 
 from gomoku.core import BOARD_SIZE, GameState, Player
 from gomoku.net.client import RemoteClientConnection
+from ._textual_base import COMMON_CSS, ThemedApp
 
 
-def _load_curses():
-    try:
-        import curses
-    except ImportError as exc:
-        raise RuntimeError("curses is required for the terminal UI and is typically available on Linux.") from exc
-    return curses
+def format_position(row: int, col: int) -> str:
+    return f"{chr(ord('A') + col)}{row + 1}"
 
 
-@dataclass
-class _RenderContext:
-    state: GameState
-    cursor_row: int
-    cursor_col: int
-    status_lines: list[str]
-    footer_lines: list[str]
+def render_board_text(state: GameState, cursor_row: int, cursor_col: int) -> str:
+    header = "    " + "".join(f" {chr(ord('A') + index)} " for index in range(BOARD_SIZE))
+    lines = [header]
+    for row in range(BOARD_SIZE):
+        cells: list[str] = []
+        for col in range(BOARD_SIZE):
+            cell = state.board.grid[row][col]
+            symbol = "." if cell is None else cell.stone
+            if row == cursor_row and col == cursor_col:
+                token = f"[{symbol}]"
+            elif state.last_move and state.last_move.row == row and state.last_move.col == col:
+                token = f"({symbol})"
+            else:
+                token = f" {symbol} "
+            cells.append(token)
+        lines.append(f"{row + 1:>3} " + "".join(cells))
+    return "\n".join(lines)
 
 
-class _BoardRenderer:
-    def __init__(self, curses_mod) -> None:
-        self.curses = curses_mod
+class _BaseGomokuApp(ThemedApp):
+    CSS = (
+        COMMON_CSS
+        + """
+        #action-row {
+            height: auto;
+        }
 
-    def render(self, stdscr, context: _RenderContext) -> None:
-        stdscr.erase()
-        height, width = stdscr.getmaxyx()
-        required_height = BOARD_SIZE + 7
-        required_width = 4 + (BOARD_SIZE * 3)
-        if height < required_height or width < required_width:
-            self._safe_addstr(stdscr, 0, 0, f"Terminal too small. Need at least {required_width}x{required_height}.")
-            self._safe_addstr(stdscr, 1, 0, f"Current size: {width}x{height}")
-            stdscr.refresh()
-            return
+        #action-row Button {
+            margin-right: 1;
+            min-width: 10;
+        }
+        """
+    )
+    BINDINGS = ThemedApp.BINDINGS + [
+        Binding("up", "move_up", "Up", show=False),
+        Binding("down", "move_down", "Down", show=False),
+        Binding("left", "move_left", "Left", show=False),
+        Binding("right", "move_right", "Right", show=False),
+        Binding("enter", "confirm_action", "Confirm"),
+        Binding("space", "confirm_action", "Confirm", show=False),
+    ]
 
-        start_y = 1
-        start_x = 4
+    def __init__(self, *, theme: str = "modern") -> None:
+        super().__init__(theme=theme)
+        self.state = GameState()
+        self.cursor_row = BOARD_SIZE // 2
+        self.cursor_col = BOARD_SIZE // 2
+        self.message = "Arrow keys move. Enter places a stone."
 
-        self._safe_addstr(stdscr, 0, start_x, self._column_header())
-        for row in range(BOARD_SIZE):
-            self._safe_addstr(stdscr, start_y + row, 0, f"{row + 1:>2} ")
-            for col in range(BOARD_SIZE):
-                attr = self.curses.A_NORMAL
-                if context.state.last_move and context.state.last_move.row == row and context.state.last_move.col == col:
-                    attr |= self.curses.A_BOLD
-                if context.cursor_row == row and context.cursor_col == col:
-                    attr |= self.curses.A_REVERSE
-                symbol = self._cell_symbol(context.state, row, col)
-                self._safe_addstr(stdscr, start_y + row, start_x + (col * 3), f" {symbol} ", attr)
+    def compose(self) -> ComposeResult:
+        yield Static("Gomoku", id="app-title")
+        with Horizontal(id="app-body"):
+            with Vertical(classes="panel primary-panel"):
+                yield Static("", id="board-view", classes="board-text")
+            with Vertical(classes="panel side-panel"):
+                yield Static("", id="info-view")
+                with Horizontal(id="action-row"):
+                    yield from self.compose_actions()
+        yield Static("", id="help-panel")
+        yield Static("", id="status-bar")
 
-        info_y = start_y + BOARD_SIZE + 1
-        for offset, line in enumerate(context.status_lines):
-            self._safe_addstr(stdscr, info_y + offset, 0, line[: max(0, width - 1)])
+    def compose_actions(self) -> ComposeResult:
+        yield Button("Place", id="place")
 
-        footer_y = info_y + len(context.status_lines) + 1
-        for offset, line in enumerate(context.footer_lines):
-            self._safe_addstr(stdscr, footer_y + offset, 0, line[: max(0, width - 1)])
+    def on_mount(self) -> None:
+        super().on_mount()
+        self.refresh_view()
 
-        stdscr.refresh()
+    def refresh_view(self) -> None:
+        self.query_one("#board-view", Static).update(render_board_text(self.state, self.cursor_row, self.cursor_col))
+        self.query_one("#info-view", Static).update(self.render_info())
+        self.update_status(self.message)
 
-    def _column_header(self) -> str:
-        labels = [chr(ord("A") + index) for index in range(BOARD_SIZE)]
-        return "".join(f" {label} " for label in labels)
+    def render_info(self) -> str:
+        return "\n".join([self.state.status_text(), f"Cursor: {format_position(self.cursor_row, self.cursor_col)}"])
 
-    def _cell_symbol(self, state: GameState, row: int, col: int) -> str:
-        cell = state.board.grid[row][col]
-        if cell is None:
-            return "."
-        return cell.stone
+    def move_cursor(self, delta_row: int, delta_col: int) -> None:
+        self.cursor_row = max(0, min(BOARD_SIZE - 1, self.cursor_row + delta_row))
+        self.cursor_col = max(0, min(BOARD_SIZE - 1, self.cursor_col + delta_col))
+        self.refresh_view()
 
-    def _safe_addstr(self, stdscr, row: int, col: int, text: str, attr: int = 0) -> None:
+    def action_move_up(self) -> None:
+        self.move_cursor(-1, 0)
+
+    def action_move_down(self) -> None:
+        self.move_cursor(1, 0)
+
+    def action_move_left(self) -> None:
+        self.move_cursor(0, -1)
+
+    def action_move_right(self) -> None:
+        self.move_cursor(0, 1)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "place":
+            self.action_confirm_action()
+
+
+class LocalGameApp(_BaseGomokuApp):
+    help_text = "Arrows move  Enter/Space place stone  t theme  ? help  q quit"
+
+    def action_confirm_action(self) -> None:
         try:
-            stdscr.addstr(row, col, text, attr)
-        except self.curses.error:
-            pass
+            self.state.play(self.cursor_row, self.cursor_col)
+        except ValueError as exc:
+            self.message = str(exc)
+        else:
+            if self.state.finished:
+                self.message = self.state.status_text()
+            else:
+                self.message = f"Placed {self.state.last_move.player.label} at {format_position(self.cursor_row, self.cursor_col)}."
+        self.refresh_view()
 
 
-class LocalGameApp:
-    def run(self) -> int:
-        curses = _load_curses()
-        return curses.wrapper(self._main)
+class RemoteGameApp(_BaseGomokuApp):
+    BINDINGS = _BaseGomokuApp.BINDINGS + [
+        Binding("r", "send_ready", "Ready"),
+        Binding("s", "send_resign", "Resign"),
+        Binding("x", "close_room", "Close", show=False),
+    ]
+    help_text = "Arrows move  Enter send move  r ready  s resign  x close paused room  t theme"
 
-    def _main(self, stdscr) -> int:
-        curses = _load_curses()
-        renderer = _BoardRenderer(curses)
-        state = GameState()
-        cursor_row = BOARD_SIZE // 2
-        cursor_col = BOARD_SIZE // 2
-        message = "Arrow keys move. Enter/Space places a stone."
-
-        self._configure_screen(stdscr, curses, blocking=True)
-
-        while True:
-            footer = ["Controls: arrows move, Enter/Space place, q quit"]
-            if state.finished:
-                footer = ["Game over. Press any key to exit."]
-
-            renderer.render(
-                stdscr,
-                _RenderContext(
-                    state=state,
-                    cursor_row=cursor_row,
-                    cursor_col=cursor_col,
-                    status_lines=[state.status_text(), message],
-                    footer_lines=footer,
-                ),
-            )
-
-            key = stdscr.getch()
-
-            if state.finished:
-                return 0
-
-            if key in (ord("q"), ord("Q")):
-                if self._confirm_quit(stdscr, curses):
-                    return 0
-                message = "Quit cancelled."
-                continue
-
-            moved = _move_cursor_from_key(key, cursor_row, cursor_col)
-            if moved is not None:
-                cursor_row, cursor_col = moved
-                continue
-
-            if key in (curses.KEY_ENTER, 10, 13, ord(" ")):
-                try:
-                    state.play(cursor_row, cursor_col)
-                except ValueError as exc:
-                    message = str(exc)
-                else:
-                    if state.finished:
-                        message = state.status_text()
-                    else:
-                        message = f"Placed {state.last_move.player.label} at {format_position(cursor_row, cursor_col)}."
-
-    def _configure_screen(self, stdscr, curses, blocking: bool) -> None:
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        stdscr.keypad(True)
-        stdscr.timeout(-1 if blocking else 100)
-
-    def _confirm_quit(self, stdscr, curses) -> bool:
-        height, _width = stdscr.getmaxyx()
-        prompt_row = min(height - 1, BOARD_SIZE + 6)
-        stdscr.move(prompt_row, 0)
-        stdscr.clrtoeol()
-        stdscr.addstr(prompt_row, 0, "Quit current game? (y/N) ")
-        stdscr.refresh()
-        key = stdscr.getch()
-        return key in (ord("y"), ord("Y"))
-
-
-class RemoteGameApp:
-    def __init__(self, host: str, port: int, name: str, session_token: str | None = None) -> None:
+    def __init__(self, host: str, port: int, name: str, session_token: str | None = None, *, theme: str = "modern") -> None:
+        super().__init__(theme=theme)
         self.host = host
         self.port = port
         self.name = name
         self.session_token = session_token
+        self.connection = RemoteClientConnection(host, port, name, session_token)
+        self.local_player: Player | None = None
+        self.room: dict[str, Any] | None = None
+        self.disconnected = False
+        self.room_closed = False
+        self.message = f"Connecting to {host}:{port}..."
 
-    def run(self) -> int:
-        connection = RemoteClientConnection(self.host, self.port, self.name, self.session_token)
-        connection.connect()
-        curses = _load_curses()
-        try:
-            return curses.wrapper(self._main, connection)
-        finally:
-            connection.close()
+    def compose_actions(self) -> ComposeResult:
+        yield Button("Move", id="place")
+        yield Button("Ready", id="ready")
+        yield Button("Resign", id="resign")
+        yield Button("Close", id="close")
 
-    def _main(self, stdscr, connection: RemoteClientConnection) -> int:
-        curses = _load_curses()
-        renderer = _BoardRenderer(curses)
-        state = GameState()
-        cursor_row = BOARD_SIZE // 2
-        cursor_col = BOARD_SIZE // 2
-        local_player: Player | None = None
-        room: dict[str, Any] | None = None
-        message = f"Connected to {self.host}:{self.port}. Joining room..."
-        disconnected = False
-        room_closed = False
-        session_token = self.session_token
+    def on_mount(self) -> None:
+        super().on_mount()
+        self.connection.connect()
+        self.set_interval(0.1, self.poll_messages)
+        self.message = f"Connected to {self.host}:{self.port}. Joining room..."
+        self.refresh_view()
 
-        self._configure_screen(stdscr, curses)
+    def on_unmount(self) -> None:
+        self.connection.close()
 
-        while True:
-            for payload in connection.poll_messages():
-                payload_type = payload.get("type")
-                if payload_type == "welcome":
-                    session_token = str(payload["session_token"])
-                    message = f"Joined as {payload['name']}. Session token saved for reconnect."
-                elif payload_type == "room_state":
-                    room = dict(payload["room"])
-                    local_player = Player(str(room["you_color"]))
-                    board_state = room.get("board_state")
-                    state = GameState.from_snapshot(board_state) if isinstance(board_state, dict) else GameState()
-                    message = str(room.get("message", ""))
-                elif payload_type == "error":
-                    message = str(payload.get("message", "Server rejected the action."))
-                elif payload_type == "disconnect":
-                    disconnected = True
-                    room_closed = True
-                    message = str(payload.get("message", "Connection closed."))
+    def poll_messages(self) -> None:
+        for payload in self.connection.poll_messages():
+            payload_type = payload.get("type")
+            if payload_type == "welcome":
+                self.session_token = str(payload["session_token"])
+                self.message = f"Joined as {payload['name']}."
+            elif payload_type == "room_state":
+                self.room = dict(payload["room"])
+                self.local_player = Player(str(self.room["you_color"])) if "you_color" in self.room else None
+                board_state = self.room.get("board_state")
+                self.state = GameState.from_snapshot(board_state) if isinstance(board_state, dict) else GameState()
+                self.message = str(self.room.get("message", self.message))
+            elif payload_type == "error":
+                self.message = str(payload.get("message", "Server rejected the action."))
+            elif payload_type == "disconnect":
+                self.disconnected = True
+                self.room_closed = True
+                self.message = str(payload.get("message", "Connection closed."))
+        self.refresh_view()
+        if self.room_closed:
+            self.exit(0)
 
-            phase = "waiting_for_players" if room is None else str(room.get("phase", "waiting_for_players"))
-            footer = self._footer_lines(phase, local_player, state, disconnected)
-            status = self._status_lines(room, local_player, state, cursor_row, cursor_col, message, session_token)
+    def render_info(self) -> str:
+        if self.room is None:
+            lines = [self.state.status_text(), f"Cursor: {format_position(self.cursor_row, self.cursor_col)}"]
+            if self.session_token is not None:
+                lines.append(f"Reconnect token: {self.session_token}")
+            return "\n".join(lines)
 
-            renderer.render(
-                stdscr,
-                _RenderContext(
-                    state=state,
-                    cursor_row=cursor_row,
-                    cursor_col=cursor_col,
-                    status_lines=status,
-                    footer_lines=footer,
-                ),
-            )
-
-            key = stdscr.getch()
-
-            if key == -1:
-                continue
-
-            if disconnected:
-                return 0
-
-            if key in (ord("q"), ord("Q")):
-                try:
-                    connection.send_leave()
-                except OSError:
-                    pass
-                return 0
-
-            moved = _move_cursor_from_key(key, cursor_row, cursor_col)
-            if moved is not None:
-                cursor_row, cursor_col = moved
-                continue
-
-            if key in (ord("r"), ord("R")):
-                try:
-                    connection.send_ready()
-                except OSError:
-                    disconnected = True
-                    message = "Failed to send ready. Connection closed."
-                else:
-                    message = "Ready sent."
-                continue
-
-            if key in (ord("s"), ord("S")):
-                try:
-                    connection.send_resign()
-                except OSError:
-                    disconnected = True
-                    message = "Failed to send resign. Connection closed."
-                else:
-                    message = "Resignation sent."
-                continue
-
-            if key in (ord("x"), ord("X")):
-                try:
-                    connection.send_close_room()
-                except OSError:
-                    disconnected = True
-                    message = "Failed to close room. Connection closed."
-                else:
-                    message = "Room close requested."
-                continue
-
-            if key in (curses.KEY_ENTER, 10, 13, ord(" ")):
-                if phase != "in_game":
-                    message = "The round is not running."
-                elif local_player is None:
-                    message = "Still waiting for player assignment."
-                elif state.current_player is not local_player:
-                    message = "It is not your turn."
-                else:
-                    try:
-                        connection.send_move(cursor_row, cursor_col)
-                    except OSError:
-                        disconnected = True
-                        message = "Failed to send move. Connection closed."
-                    else:
-                        message = f"Submitted move at {format_position(cursor_row, cursor_col)}."
-
-            if room_closed:
-                return 0
-
-    def _configure_screen(self, stdscr, curses) -> None:
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        stdscr.keypad(True)
-        stdscr.timeout(100)
-
-    def _footer_lines(self, phase: str, local_player: Player | None, state: GameState, disconnected: bool) -> list[str]:
-        if disconnected or phase == "closed":
-            return ["Session ended. Press any key to exit."]
-        if phase == "waiting_for_players":
-            return ["Waiting for another player.", "Press q to leave."]
-        if phase == "waiting_ready":
-            return ["Between rounds: press r when ready, q to leave."]
-        if phase == "paused_reconnect":
-            return ["Opponent disconnected: press x to close room, q to leave."]
-        if local_player is not None and state.current_player is local_player:
-            return ["Your turn: arrows move, Enter/Space send move, s resign, q leave"]
-        return ["Opponent's turn: arrows move, s resign, q leave"]
-
-    def _status_lines(
-        self,
-        room: dict[str, Any] | None,
-        local_player: Player | None,
-        state: GameState,
-        cursor_row: int,
-        cursor_col: int,
-        message: str,
-        session_token: str | None,
-    ) -> list[str]:
-        if room is None:
-            lines = [state.status_text(), message]
-            if session_token is not None:
-                lines.append(f"Reconnect token: {session_token}")
-            return lines
-
-        scoreboard = room["scoreboard"]
-        seats = {seat["player_color"]: seat for seat in room["seats"]}
-        black = seats.get(Player.BLACK.value, {})
-        white = seats.get(Player.WHITE.value, {})
-        phase = str(room["phase"])
+        scoreboard = self.room["scoreboard"]
+        seats = {seat["player_color"]: seat for seat in self.room["seats"]}
         lines = [
-            f"Phase: {phase} | Round: {room['round_number']} | Score B/W/D: {scoreboard['black_wins']}/{scoreboard['white_wins']}/{scoreboard['draws']}",
-            self._seat_status(Player.BLACK, black),
-            self._seat_status(Player.WHITE, white),
+            f"Phase: {self.room['phase']}",
+            f"Round: {self.room['round_number']}",
+            f"Score B/W/D: {scoreboard['black_wins']}/{scoreboard['white_wins']}/{scoreboard['draws']}",
+            self._seat_status(Player.BLACK, seats.get(Player.BLACK.value, {})),
+            self._seat_status(Player.WHITE, seats.get(Player.WHITE.value, {})),
+            self.state.status_text(),
+            f"Cursor: {format_position(self.cursor_row, self.cursor_col)}",
         ]
-
-        if phase == "in_game":
-            lines.append(state.status_text())
-        if local_player is not None:
-            lines.append(f"You are {local_player.label}. Cursor at {format_position(cursor_row, cursor_col)}.")
-        lines.append(message)
-        if session_token is not None:
-            lines.append(f"Reconnect token: {session_token}")
-        return lines
+        if self.local_player is not None:
+            lines.append(f"You are {self.local_player.label}.")
+        if self.session_token is not None:
+            lines.append(f"Reconnect token: {self.session_token}")
+        return "\n".join(lines)
 
     def _seat_status(self, color: Player, seat: dict[str, Any]) -> str:
         name = seat.get("name") or "(empty)"
@@ -355,26 +219,81 @@ class RemoteGameApp:
         ready = "ready" if seat.get("ready") else "not ready"
         return f"{color.label}: {name} [{online}, {ready}]"
 
+    def action_confirm_action(self) -> None:
+        phase = "waiting_for_players" if self.room is None else str(self.room.get("phase", "waiting_for_players"))
+        if phase != "in_game":
+            self.message = "The round is not running."
+        elif self.local_player is None:
+            self.message = "Still waiting for player assignment."
+        elif self.state.current_player is not self.local_player:
+            self.message = "It is not your turn."
+        else:
+            try:
+                self.connection.send_move(self.cursor_row, self.cursor_col)
+            except OSError:
+                self.disconnected = True
+                self.message = "Failed to send move. Connection closed."
+            else:
+                self.message = f"Submitted move at {format_position(self.cursor_row, self.cursor_col)}."
+        self.refresh_view()
 
-def _move_cursor_from_key(key: int, row: int, col: int) -> tuple[int, int] | None:
-    if key == _load_curses().KEY_UP:
-        return max(0, row - 1), col
-    if key == _load_curses().KEY_DOWN:
-        return min(BOARD_SIZE - 1, row + 1), col
-    if key == _load_curses().KEY_LEFT:
-        return row, max(0, col - 1)
-    if key == _load_curses().KEY_RIGHT:
-        return row, min(BOARD_SIZE - 1, col + 1)
-    return None
+    def action_send_ready(self) -> None:
+        try:
+            self.connection.send_ready()
+        except OSError:
+            self.disconnected = True
+            self.message = "Failed to send ready. Connection closed."
+        else:
+            self.message = "Ready sent."
+        self.refresh_view()
+
+    def action_send_resign(self) -> None:
+        try:
+            self.connection.send_resign()
+        except OSError:
+            self.disconnected = True
+            self.message = "Failed to send resign. Connection closed."
+        else:
+            self.message = "Resignation sent."
+        self.refresh_view()
+
+    def action_close_room(self) -> None:
+        try:
+            self.connection.send_close_room()
+        except OSError:
+            self.disconnected = True
+            self.message = "Failed to close room. Connection closed."
+        else:
+            self.message = "Room close requested."
+        self.refresh_view()
+
+    def action_quit_app(self) -> None:
+        try:
+            self.connection.send_leave()
+        except OSError:
+            pass
+        self.exit(0)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "place":
+            self.action_confirm_action()
+        elif event.button.id == "ready":
+            self.action_send_ready()
+        elif event.button.id == "resign":
+            self.action_send_resign()
+        elif event.button.id == "close":
+            self.action_close_room()
 
 
-def format_position(row: int, col: int) -> str:
-    return f"{chr(ord('A') + col)}{row + 1}"
+def run_local_game(*, theme: str = "modern") -> int:
+    return LocalGameApp(theme=theme).run() or 0
 
 
-def run_local_game() -> int:
-    return LocalGameApp().run()
-
-
-def run_remote_client(host: str, port: int, name: str, session_token: str | None = None) -> int:
-    return RemoteGameApp(host, port, name, session_token).run()
+def run_remote_client(
+    host: str,
+    port: int,
+    name: str,
+    session_token: str | None = None,
+    theme: str = "modern",
+) -> int:
+    return RemoteGameApp(host, port, name, session_token, theme=theme).run() or 0

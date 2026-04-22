@@ -74,12 +74,12 @@ class MinesweeperGame:
         cell = self.grid[row][col]
         if cell.is_flagged:
             raise ValueError("Flagged cells must be unflagged before revealing.")
-        if cell.is_revealed:
-            raise ValueError("That cell is already revealed.")
         if not self.initialized:
             self._place_random_mines(row, col)
 
         cell = self.grid[row][col]
+        if cell.is_revealed:
+            return self._reveal_adjacent_from_number(row, col)
         if cell.has_mine:
             cell.is_revealed = True
             self.finished = True
@@ -159,12 +159,25 @@ class MinesweeperGame:
         self.initialized = True
 
     def _place_random_mines(self, safe_row: int, safe_col: int) -> None:
+        safe_zone = {
+            (row, col)
+            for row in range(safe_row - 1, safe_row + 2)
+            for col in range(safe_col - 1, safe_col + 2)
+            if self.in_bounds(row, col)
+        }
         candidates = [
             (row, col)
             for row in range(self.rows)
             for col in range(self.cols)
-            if (row, col) != (safe_row, safe_col)
+            if (row, col) not in safe_zone
         ]
+        if len(candidates) < self.mines:
+            candidates = [
+                (row, col)
+                for row in range(self.rows)
+                for col in range(self.cols)
+                if (row, col) != (safe_row, safe_col)
+            ]
         mine_positions = set(self._rng.sample(candidates, self.mines))
         self._apply_mines(mine_positions)
 
@@ -211,6 +224,43 @@ class MinesweeperGame:
                 if neighbor.has_mine or neighbor.is_revealed or neighbor.is_flagged:
                     continue
                 queue.append((neighbor_row, neighbor_col))
+        return revealed
+
+    def _reveal_adjacent_from_number(self, row: int, col: int) -> set[tuple[int, int]]:
+        cell = self.grid[row][col]
+        if cell.adjacent_mines == 0:
+            return set()
+
+        flagged_neighbors = 0
+        hidden_neighbors: list[tuple[int, int]] = []
+        for neighbor_row, neighbor_col in self._neighbors(row, col):
+            neighbor = self.grid[neighbor_row][neighbor_col]
+            if neighbor.is_flagged:
+                flagged_neighbors += 1
+            elif not neighbor.is_revealed:
+                hidden_neighbors.append((neighbor_row, neighbor_col))
+
+        if flagged_neighbors != cell.adjacent_mines:
+            return set()
+
+        revealed: set[tuple[int, int]] = set()
+        for neighbor_row, neighbor_col in hidden_neighbors:
+            neighbor = self.grid[neighbor_row][neighbor_col]
+            if neighbor.has_mine:
+                neighbor.is_revealed = True
+                self.finished = True
+                self.won = False
+                self.lost = True
+                self.exploded_cell = (neighbor_row, neighbor_col)
+                self._reveal_all_mines()
+                return {(neighbor_row, neighbor_col)}
+            revealed.update(self._reveal_region(neighbor_row, neighbor_col))
+
+        if self.revealed_safe_cells == self.safe_cells:
+            self.finished = True
+            self.won = True
+            self.lost = False
+            self._flag_all_hidden_mines()
         return revealed
 
     def _reveal_all_mines(self) -> None:

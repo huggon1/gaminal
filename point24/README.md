@@ -6,7 +6,7 @@ A terminal 24-point puzzle game.
 
 - `uv`
 - Python 3.12+
-- A Linux terminal with `curses`
+- A terminal with Textual support
 
 ## Setup
 
@@ -17,8 +17,11 @@ uv sync
 ## Run
 
 ```bash
-uv run python -m point24
+uv run python -m point24 --theme modern
+uv run python -m point24 --theme stealth
 ```
+
+The Textual UI supports `t` for runtime theme switching and `?` for help.
 
 ## Controls
 

@@ -1,5 +1,5 @@
-from .ui import run_point24_game
+from .cli import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_point24_game())
+    raise SystemExit(main())

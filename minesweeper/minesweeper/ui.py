@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Button, Static
 
+from ._textual_base import COMMON_CSS, ThemedApp
 from .core import MinesweeperGame, PRESET_DIFFICULTIES
-
-
-def _load_curses():
-    try:
-        import curses
-    except ImportError as exc:
-        raise RuntimeError("curses is required for the terminal UI and is typically available on Linux.") from exc
-    return curses
 
 
 @dataclass(frozen=True)
@@ -27,181 +25,185 @@ class GameConfig:
         return f"{self.rows}x{self.cols}/{self.mines}"
 
 
-class _BoardRenderer:
-    CELL_WIDTH = 4
-    ROW_LABEL_WIDTH = 4
+class LocalMinesweeperApp(ThemedApp):
+    CSS = (
+        COMMON_CSS
+        + """
+        #board-panel {
+            width: 2fr;
+        }
 
-    def __init__(self, curses_mod) -> None:
-        self.curses = curses_mod
+        #stats-panel {
+            width: 1fr;
+        }
 
-    def render(
-        self,
-        stdscr,
-        game: MinesweeperGame,
-        cursor_row: int,
-        cursor_col: int,
-        status_lines: list[str],
-        footer_lines: list[str],
-    ) -> None:
-        stdscr.erase()
-        height, width = stdscr.getmaxyx()
-        required_height = game.rows + len(status_lines) + len(footer_lines) + 5
-        required_width = self.ROW_LABEL_WIDTH + (game.cols * self.CELL_WIDTH)
-        if height < required_height or width < required_width:
-            self._safe_addstr(stdscr, 0, 0, f"Terminal too small. Need at least {required_width}x{required_height}.")
-            self._safe_addstr(stdscr, 1, 0, f"Current size: {width}x{height}")
-            stdscr.refresh()
-            return
+        #board-view {
+            text-style: bold;
+        }
 
-        start_y = 1
-        start_x = self.ROW_LABEL_WIDTH
-        for col in range(game.cols):
-            label = column_label(col)
-            self._safe_addstr(stdscr, 0, start_x + (col * self.CELL_WIDTH), label.center(self.CELL_WIDTH))
+        #control-row {
+            height: auto;
+        }
 
-        for row in range(game.rows):
-            self._safe_addstr(stdscr, start_y + row, 0, f"{row + 1:>3} ")
-            for col in range(game.cols):
-                attr = self.curses.A_NORMAL
-                if row == cursor_row and col == cursor_col:
-                    attr |= self.curses.A_REVERSE
-                if game.exploded_cell == (row, col):
-                    attr |= self.curses.A_BOLD
-                symbol = self._cell_symbol(game, row, col)
-                self._safe_addstr(
-                    stdscr,
-                    start_y + row,
-                    start_x + (col * self.CELL_WIDTH),
-                    symbol.center(self.CELL_WIDTH),
-                    attr,
-                )
+        #control-row Button {
+            margin-right: 1;
+            min-width: 8;
+        }
+        """
+    )
+    BINDINGS = ThemedApp.BINDINGS + [
+        Binding("up", "move_up", "Up", show=False),
+        Binding("down", "move_down", "Down", show=False),
+        Binding("left", "move_left", "Left", show=False),
+        Binding("right", "move_right", "Right", show=False),
+        Binding("enter", "reveal_cell", "Reveal"),
+        Binding("space", "reveal_cell", "Reveal", show=False),
+        Binding("f", "toggle_flag", "Flag"),
+        Binding("r", "restart_board", "Restart"),
+    ]
+    help_text = "Arrows move  Enter/Space reveal  f flag  r restart  t theme  ? help  q quit"
 
-        info_y = start_y + game.rows + 1
-        for offset, line in enumerate(status_lines):
-            self._safe_addstr(stdscr, info_y + offset, 0, line[: max(0, width - 1)])
+    def __init__(self, config: GameConfig, *, theme: str = "modern") -> None:
+        super().__init__(theme=theme)
+        self.config = config
+        self.game = MinesweeperGame(
+            config.rows,
+            config.cols,
+            config.mines,
+            difficulty_name=config.difficulty_name,
+        )
+        self.cursor_row = min(self.game.rows // 2, self.game.rows - 1)
+        self.cursor_col = min(self.game.cols // 2, self.game.cols - 1)
+        self.message = "Arrow keys move. Enter reveals. f toggles a flag."
 
-        footer_y = info_y + len(status_lines) + 1
-        for offset, line in enumerate(footer_lines):
-            self._safe_addstr(stdscr, footer_y + offset, 0, line[: max(0, width - 1)])
+    def compose(self) -> ComposeResult:
+        yield Static(f"Minesweeper [{self.config.title}]", id="app-title")
+        with Horizontal(id="app-body"):
+            with Vertical(classes="panel primary-panel", id="board-panel"):
+                yield Static("", id="board-view", classes="board-text")
+            with Vertical(classes="panel side-panel", id="stats-panel"):
+                yield Static("", id="stats-view")
+                with Horizontal(id="control-row"):
+                    yield Button("Reveal", id="reveal")
+                    yield Button("Flag", id="flag")
+                    yield Button("Restart", id="restart")
+        yield Static("", id="help-panel")
+        yield Static("", id="status-bar")
 
-        stdscr.refresh()
+    def on_mount(self) -> None:
+        super().on_mount()
+        self.refresh_view()
 
-    def _cell_symbol(self, game: MinesweeperGame, row: int, col: int) -> str:
-        cell = game.grid[row][col]
+    def refresh_view(self) -> None:
+        self.query_one("#board-view", Static).update(self.render_board())
+        stats = [
+            f"Board: {self.game.rows}x{self.game.cols}",
+            f"Mines: {self.game.mines}",
+            f"Remaining estimate: {self.game.remaining_mine_estimate()}",
+            f"Cursor: {format_position(self.cursor_row, self.cursor_col)}",
+            f"State: {self.game.status_text()}",
+            "",
+            "Controls:",
+            "  Arrows move",
+            "  Enter/Space reveal",
+            "  f toggles flag",
+            "  r restarts board",
+        ]
+        self.query_one("#stats-view", Static).update("\n".join(stats))
+        self.update_status(self.message)
+
+    def render_board(self) -> Text:
+        board = Text()
+        board.append("    " + " ".join(column_label(col).rjust(3) for col in range(self.game.cols)))
+        board.append("\n")
+        for row in range(self.game.rows):
+            board.append(f"{row + 1:>3} ")
+            for col in range(self.game.cols):
+                symbol = self.cell_symbol(row, col)
+                token = f" {symbol} "
+                if row == self.cursor_row and col == self.cursor_col:
+                    board.append(token, style="reverse")
+                else:
+                    board.append(token)
+            if row < self.game.rows - 1:
+                board.append("\n")
+        return board
+
+    def cell_symbol(self, row: int, col: int) -> str:
+        cell = self.game.grid[row][col]
+        if self.game.finished and cell.is_flagged and not cell.has_mine:
+            return "x"
+        if cell.is_revealed and self.game.exploded_cell == (row, col):
+            return "!"
+        if cell.is_revealed and cell.has_mine:
+            return "*"
         if cell.is_flagged:
             return "F"
         if not cell.is_revealed:
             return "#"
-        if cell.has_mine:
-            return "*"
         if cell.adjacent_mines == 0:
-            return "."
+            return " "
         return str(cell.adjacent_mines)
 
-    def _safe_addstr(self, stdscr, row: int, col: int, text: str, attr: int = 0) -> None:
+    def move_cursor(self, delta_row: int, delta_col: int) -> None:
+        self.cursor_row = (self.cursor_row + delta_row) % self.game.rows
+        self.cursor_col = (self.cursor_col + delta_col) % self.game.cols
+        self.refresh_view()
+
+    def action_move_up(self) -> None:
+        self.move_cursor(-1, 0)
+
+    def action_move_down(self) -> None:
+        self.move_cursor(1, 0)
+
+    def action_move_left(self) -> None:
+        self.move_cursor(0, -1)
+
+    def action_move_right(self) -> None:
+        self.move_cursor(0, 1)
+
+    def action_reveal_cell(self) -> None:
+        was_revealed = self.game.grid[self.cursor_row][self.cursor_col].is_revealed
         try:
-            stdscr.addstr(row, col, text, attr)
-        except self.curses.error:
-            pass
+            revealed = self.game.reveal(self.cursor_row, self.cursor_col)
+        except ValueError as exc:
+            self.message = str(exc)
+        else:
+            if self.game.finished:
+                self.message = self.game.status_text()
+            elif was_revealed and revealed:
+                self.message = f"Opened {len(revealed)} adjacent cells."
+            elif was_revealed:
+                self.message = "Adjacent flags do not match the number."
+            elif len(revealed) > 1:
+                self.message = f"Revealed {len(revealed)} cells."
+            else:
+                self.message = f"Revealed {format_position(self.cursor_row, self.cursor_col)}."
+        self.refresh_view()
 
-
-class LocalMinesweeperApp:
-    def __init__(self, config: GameConfig) -> None:
-        self.config = config
-
-    def run(self) -> int:
-        curses = _load_curses()
-        return curses.wrapper(self._main)
-
-    def _main(self, stdscr) -> int:
-        curses = _load_curses()
-        renderer = _BoardRenderer(curses)
-        game = MinesweeperGame(
-            self.config.rows,
-            self.config.cols,
-            self.config.mines,
-            difficulty_name=self.config.difficulty_name,
-        )
-        cursor_row = min(game.rows // 2, game.rows - 1)
-        cursor_col = min(game.cols // 2, game.cols - 1)
-        message = "Arrow keys move. Enter/Space reveals. f toggles a flag."
-
-        self._configure_screen(stdscr, curses)
-
-        while True:
-            status = [
-                f"Minesweeper {self.config.title} | Board {game.rows}x{game.cols} | Mines {game.mines} | Remaining {game.remaining_mine_estimate()}",
-                f"Cursor: {format_position(cursor_row, cursor_col)}",
-                game.status_text(),
-                message,
-            ]
-            footer = self._footer_lines(game)
-            renderer.render(stdscr, game, cursor_row, cursor_col, status, footer)
-
-            key = stdscr.getch()
-            if key == -1:
-                continue
-
-            if key in (ord("q"), ord("Q")):
-                if self._confirm_quit(stdscr, curses, game.rows):
-                    return 0
-                message = "Quit cancelled."
-                continue
-
-            moved = move_cursor_from_key(curses, key, cursor_row, cursor_col, game.rows, game.cols)
-            if moved is not None:
-                cursor_row, cursor_col = moved
-                continue
-
-            if key in (ord("r"), ord("R")):
-                game.restart()
-                message = "Started a new board."
-                continue
-
-            if key in (ord("f"), ord("F")):
-                try:
-                    flagged = game.toggle_flag(cursor_row, cursor_col)
-                except ValueError as exc:
-                    message = str(exc)
-                else:
-                    message = "Flag placed." if flagged else "Flag removed."
-                continue
-
-            if key in (curses.KEY_ENTER, 10, 13, ord(" ")):
-                try:
-                    revealed = game.reveal(cursor_row, cursor_col)
-                except ValueError as exc:
-                    message = str(exc)
-                else:
-                    if game.lost or game.won:
-                        message = game.status_text()
-                    elif len(revealed) > 1:
-                        message = f"Revealed {len(revealed)} cells."
-                    else:
-                        message = f"Revealed {format_position(cursor_row, cursor_col)}."
-
-    def _configure_screen(self, stdscr, curses) -> None:
+    def action_toggle_flag(self) -> None:
         try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        stdscr.keypad(True)
-        stdscr.timeout(-1)
+            flagged = self.game.toggle_flag(self.cursor_row, self.cursor_col)
+        except ValueError as exc:
+            self.message = str(exc)
+        else:
+            self.message = "Flag placed." if flagged else "Flag removed."
+        self.refresh_view()
 
-    def _footer_lines(self, game: MinesweeperGame) -> list[str]:
-        if game.finished:
-            return ["Controls: r restart, q quit"]
-        return ["Controls: arrows move, Enter/Space reveal, f flag, r restart, q quit"]
+    def action_restart_board(self) -> None:
+        self.game.restart()
+        self.cursor_row = min(self.game.rows // 2, self.game.rows - 1)
+        self.cursor_col = min(self.game.cols // 2, self.game.cols - 1)
+        self.message = "Started a new board."
+        self.refresh_view()
 
-    def _confirm_quit(self, stdscr, curses, board_rows: int) -> bool:
-        height, _width = stdscr.getmaxyx()
-        prompt_row = min(height - 1, board_rows + 7)
-        stdscr.move(prompt_row, 0)
-        stdscr.clrtoeol()
-        stdscr.addstr(prompt_row, 0, "Quit current game? (y/N) ")
-        stdscr.refresh()
-        key = stdscr.getch()
-        return key in (ord("y"), ord("Y"))
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "reveal":
+            self.action_reveal_cell()
+        elif event.button.id == "flag":
+            self.action_toggle_flag()
+        elif event.button.id == "restart":
+            self.action_restart_board()
 
 
 def column_label(col: int) -> str:
@@ -217,25 +219,6 @@ def column_label(col: int) -> str:
 
 def format_position(row: int, col: int) -> str:
     return f"{column_label(col)}{row + 1}"
-
-
-def move_cursor_from_key(
-    curses_mod,
-    key: int,
-    row: int,
-    col: int,
-    rows: int,
-    cols: int,
-) -> tuple[int, int] | None:
-    if key == curses_mod.KEY_UP:
-        return max(0, row - 1), col
-    if key == curses_mod.KEY_DOWN:
-        return min(rows - 1, row + 1), col
-    if key == curses_mod.KEY_LEFT:
-        return row, max(0, col - 1)
-    if key == curses_mod.KEY_RIGHT:
-        return row, min(cols - 1, col + 1)
-    return None
 
 
 def resolve_config(
@@ -273,6 +256,7 @@ def run_local_minesweeper(
     rows: int | None = None,
     cols: int | None = None,
     mines: int | None = None,
+    theme: str = "modern",
 ) -> int:
     config = resolve_config(difficulty_name, rows=rows, cols=cols, mines=mines)
-    return LocalMinesweeperApp(config).run()
+    return LocalMinesweeperApp(config, theme=theme).run() or 0

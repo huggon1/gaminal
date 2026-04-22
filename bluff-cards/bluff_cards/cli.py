@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     client_parser.add_argument("--port", type=int, required=True, help="Server port to connect to.")
     client_parser.add_argument("--name", required=True, help="Player name for room display.")
     client_parser.add_argument("--session-token", help="Reconnect using a previous session token.")
+    client_parser.add_argument("--theme", choices=("modern", "stealth"), default="modern", help="UI style preset.")
     return parser
 
 
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "client":
         from bluff_cards.ui import run_bluff_remote_client
 
-        return run_bluff_remote_client(args.host, args.port, args.name, args.session_token)
+        return run_bluff_remote_client(args.host, args.port, args.name, args.session_token, args.theme)
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

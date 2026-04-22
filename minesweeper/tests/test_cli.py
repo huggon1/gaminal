@@ -13,6 +13,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.rows)
         self.assertIsNone(args.cols)
         self.assertIsNone(args.mines)
+        self.assertEqual(args.theme, "modern")
 
     def test_minesweeper_accepts_custom_dimensions(self) -> None:
         args = build_parser().parse_args(
@@ -21,6 +22,12 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(args.difficulty, "expert")
         self.assertEqual((args.rows, args.cols, args.mines), (10, 12, 20))
+        self.assertEqual(args.theme, "modern")
+
+    def test_minesweeper_accepts_theme_switch(self) -> None:
+        args = build_parser().parse_args(["--theme", "stealth"])
+
+        self.assertEqual(args.theme, "stealth")
 
 
 if __name__ == "__main__":

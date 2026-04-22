@@ -6,7 +6,7 @@ A standard-library-only terminal gomoku implementation for Linux.
 
 - `uv`
 - Python 3.12+
-- A Linux terminal with `curses`
+- A terminal with Textual support
 
 ## Setup
 
@@ -17,10 +17,12 @@ uv sync
 ## Run
 
 ```bash
-uv run python -m gomoku local
+uv run python -m gomoku local --theme modern
 uv run python -m gomoku server --host 0.0.0.0 --port 9000
-uv run python -m gomoku client --host 127.0.0.1 --port 9000 --name Alice
+uv run python -m gomoku client --host 127.0.0.1 --port 9000 --name Alice --theme stealth
 ```
+
+All Textual clients support `--theme modern|stealth`, and you can press `t` in-app to switch styles.
 
 ## Remote Play
 

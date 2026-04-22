@@ -6,7 +6,7 @@ A terminal dou dizhu implementation for Linux.
 
 - `uv`
 - Python 3.12+
-- A Linux terminal with `curses`
+- A terminal with Textual support
 
 ## Setup
 
@@ -18,23 +18,19 @@ uv sync
 
 ```bash
 uv run python -m dou_dizhu server --host 0.0.0.0 --port 9010
-uv run python -m dou_dizhu client --host 127.0.0.1 --port 9010 --name Alice
+uv run python -m dou_dizhu client --host 127.0.0.1 --port 9010 --name Alice --theme modern
 ```
 
-## Commands
+The Textual client supports `--theme modern|stealth`, runtime switching with `t`, and selection-based hand interaction.
 
-Enter commands directly in the curses client prompt and press `Enter`.
+## Controls
 
-```text
-bid 1
-bid 3
-play #1 #2 #3
-play 3S 3H 3C
-pass
-quit
-```
-
-- `play #1 #2 #3` uses the indexes shown in your hand display.
+- Up/Down browse your hand
+- Space toggles card selection
+- `p` plays selected cards
+- `a` passes
+- `0`/`1`/`2`/`3` sends bids
+- `t` switches theme
 - Reconnect with:
 
 ```bash

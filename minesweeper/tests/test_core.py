@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from minesweeper.core import MinesweeperGame, PRESET_DIFFICULTIES
-from minesweeper.ui import resolve_config
+from minesweeper.ui import GameConfig, LocalMinesweeperApp, resolve_config
 
 
 class MinesweeperCoreTests(unittest.TestCase):
@@ -21,6 +21,9 @@ class MinesweeperCoreTests(unittest.TestCase):
 
         self.assertTrue(game.initialized)
         self.assertFalse(game.grid[2][2].has_mine)
+        for row in range(1, 4):
+            for col in range(1, 4):
+                self.assertFalse(game.grid[row][col].has_mine)
         self.assertEqual(sum(cell.has_mine for row in game.grid for cell in row), 5)
 
     def test_adjacent_mine_counts_are_computed(self) -> None:
@@ -51,6 +54,29 @@ class MinesweeperCoreTests(unittest.TestCase):
         game.reveal(0, 1)
         with self.assertRaisesRegex(ValueError, "cannot be flagged"):
             game.toggle_flag(0, 1)
+
+    def test_revealing_number_with_matching_flags_opens_neighbors(self) -> None:
+        game = MinesweeperGame(5, 5, 2, mine_positions={(0, 0), (4, 4)})
+
+        game.reveal(1, 1)
+        self.assertTrue(game.grid[1][1].is_revealed)
+
+        game.toggle_flag(0, 0)
+        revealed = game.reveal(1, 1)
+
+        self.assertIn((0, 1), revealed)
+        self.assertIn((1, 0), revealed)
+        self.assertTrue(game.finished)
+        self.assertTrue(game.won)
+
+    def test_revealing_number_with_wrong_flag_count_does_nothing(self) -> None:
+        game = MinesweeperGame(5, 5, 2, mine_positions={(0, 0), (4, 4)})
+
+        game.reveal(1, 1)
+        revealed = game.reveal(1, 1)
+
+        self.assertEqual(revealed, set())
+        self.assertFalse(game.finished)
 
     def test_losing_reveals_all_mines(self) -> None:
         game = MinesweeperGame(3, 3, 2, mine_positions={(0, 0), (2, 2)})
@@ -86,6 +112,50 @@ class MinesweeperCoreTests(unittest.TestCase):
         self.assertFalse(game.finished)
         self.assertEqual(game.flags_placed, 0)
         self.assertFalse(game.grid[2][2].is_revealed)
+
+    def test_cursor_wraps_around_board_edges(self) -> None:
+        app = LocalMinesweeperApp(GameConfig(rows=3, cols=3, mines=1))
+        app.refresh_view = lambda: None
+        app.cursor_row = 0
+        app.cursor_col = 0
+
+        app.move_cursor(-1, 0)
+        self.assertEqual((app.cursor_row, app.cursor_col), (2, 0))
+
+        app.move_cursor(0, -1)
+        self.assertEqual((app.cursor_row, app.cursor_col), (2, 2))
+
+    def test_restart_recenters_cursor(self) -> None:
+        app = LocalMinesweeperApp(GameConfig(rows=4, cols=6, mines=3))
+        app.refresh_view = lambda: None
+        app.cursor_row = 0
+        app.cursor_col = 0
+
+        app.action_restart_board()
+
+        self.assertEqual((app.cursor_row, app.cursor_col), (2, 3))
+
+    def test_board_symbols_show_exploded_and_wrong_flags(self) -> None:
+        app = LocalMinesweeperApp(GameConfig(rows=2, cols=2, mines=1))
+        app.game = MinesweeperGame(2, 2, 1, mine_positions={(0, 0)})
+        app.game.toggle_flag(1, 1)
+        app.game.reveal(0, 0)
+
+        self.assertEqual(app.cell_symbol(0, 0), "!")
+        self.assertEqual(app.cell_symbol(1, 1), "x")
+        self.assertEqual(app.cell_symbol(0, 1), "#")
+
+    def test_board_render_uses_styles_instead_of_markup_brackets(self) -> None:
+        app = LocalMinesweeperApp(GameConfig(rows=3, cols=3, mines=1))
+        app.cursor_row = 1
+        app.cursor_col = 1
+
+        board = app.render_board()
+        plain = board.plain
+
+        self.assertNotIn("[", plain)
+        self.assertNotIn("]", plain)
+        self.assertEqual(len(plain.splitlines()), 4)
 
     def test_preset_difficulties_and_custom_configs_are_resolved(self) -> None:
         beginner = resolve_config()
