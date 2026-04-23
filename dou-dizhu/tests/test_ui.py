@@ -85,6 +85,39 @@ class DdzUiTests(unittest.TestCase):
         self.assertIn("Recent actions:", table)
         self.assertIn("- Seat 2 played 3S.", table)
 
+    def test_render_phase_shows_finished_round(self) -> None:
+        app = DdzRemoteApp("127.0.0.1", 9010, "Alice", theme="modern")
+        app.room = {"phase": "finished"}
+
+        self.assertIn("ROUND FINISHED", app.render_phase())
+
+    def test_render_session_shows_multi_round_scores(self) -> None:
+        app = DdzRemoteApp("127.0.0.1", 9010, "Alice", theme="modern")
+        app.room = {
+            "you_seat": 1,
+            "session": {
+                "round_number": 3,
+                "points": {"1": 6, "2": -3, "3": -3},
+                "wins": {"1": 2, "2": 0, "3": 0},
+            },
+        }
+
+        session = app.render_session()
+
+        self.assertIn("Round:      3", session)
+        self.assertIn("Your score: +6", session)
+        self.assertIn("Seat pts:   S1=+6  S2=-3  S3=-3", session)
+
+    def test_bid_actions_only_show_during_bidding(self) -> None:
+        app = DdzRemoteApp("127.0.0.1", 9010, "Alice", theme="modern")
+        app.room = {"phase": "bidding"}
+        self.assertTrue(app.should_show_bid_actions())
+        self.assertFalse(app.should_show_play_actions())
+
+        app.room = {"phase": "playing"}
+        self.assertFalse(app.should_show_bid_actions())
+        self.assertTrue(app.should_show_play_actions())
+
     def test_client_connection_returns_socket_to_blocking_mode_after_connect(self) -> None:
         fake_socket = Mock()
         fake_socket.makefile.side_effect = [Mock(), Mock()]

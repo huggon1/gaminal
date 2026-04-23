@@ -23,7 +23,7 @@ def render_board_text(state: GameState, cursor_row: int, cursor_col: int) -> str
         cells: list[str] = []
         for col in range(BOARD_SIZE):
             cell = state.board.grid[row][col]
-            symbol = "." if cell is None else cell.stone
+            symbol = "·" if cell is None else cell.stone
             if row == cursor_row and col == cursor_col:
                 token = f"[{symbol}]"
             elif state.last_move and state.last_move.row == row and state.last_move.col == col:
@@ -39,8 +39,13 @@ class _BaseGomokuApp(ThemedApp):
     CSS = (
         COMMON_CSS
         + """
+        #phase-view, #info-view {
+            height: auto;
+        }
+
         #action-row {
             height: auto;
+            margin-top: 1;
         }
 
         #action-row Button {
@@ -69,6 +74,7 @@ class _BaseGomokuApp(ThemedApp):
         yield Static("Gomoku", id="app-title")
         with Horizontal(id="app-body"):
             with Vertical(classes="panel primary-panel"):
+                yield Static("", id="phase-view")
                 yield Static("", id="board-view", classes="board-text")
             with Vertical(classes="panel side-panel"):
                 yield Static("", id="info-view")
@@ -85,12 +91,39 @@ class _BaseGomokuApp(ThemedApp):
         self.refresh_view()
 
     def refresh_view(self) -> None:
+        self.query_one("#phase-view", Static).update(self.render_phase())
         self.query_one("#board-view", Static).update(render_board_text(self.state, self.cursor_row, self.cursor_col))
         self.query_one("#info-view", Static).update(self.render_info())
         self.update_status(self.message)
 
+    def render_phase(self) -> str:
+        if self.state.winner is not None:
+            return f"[bold green]✦ {self.state.winner.label.upper()} WINS ✦[/bold green]"
+        if self.state.draw:
+            return "[bold yellow]★ DRAW ★[/bold yellow]"
+        return f"[bold cyan]▶ {self.state.current_player.label.upper()} TO MOVE[/bold cyan]"
+
     def render_info(self) -> str:
-        return "\n".join([self.state.status_text(), f"Cursor: {format_position(self.cursor_row, self.cursor_col)}"])
+        return "\n".join(
+            [
+                "[bold]Board[/bold]",
+                f"Status:   {self.state.status_text()}",
+                f"Cursor:   {format_position(self.cursor_row, self.cursor_col)}",
+                f"Last:     {self._last_move_text()}",
+                "",
+                self.render_next_action(),
+            ]
+        )
+
+    def render_next_action(self) -> str:
+        if self.state.finished:
+            return "[bold yellow]Next:[/bold yellow] Review the line or press r in a future update to restart."
+        return "[bold green]Next:[/bold green] Move the cursor and place the next forcing stone."
+
+    def _last_move_text(self) -> str:
+        if self.state.last_move is None:
+            return "none"
+        return f"{self.state.last_move.player.label} @ {format_position(self.state.last_move.row, self.state.last_move.col)}"
 
     def move_cursor(self, delta_row: int, delta_col: int) -> None:
         self.cursor_row = max(0, min(BOARD_SIZE - 1, self.cursor_row + delta_row))
@@ -142,7 +175,7 @@ class RemoteGameApp(_BaseGomokuApp):
         super().__init__(theme=theme)
         self.host = host
         self.port = port
-        self.name = name
+        self.player_name = name
         self.session_token = session_token
         self.connection = RemoteClientConnection(host, port, name, session_token)
         self.local_player: Player | None = None
@@ -189,35 +222,60 @@ class RemoteGameApp(_BaseGomokuApp):
         if self.room_closed:
             self.exit(0)
 
+    def render_phase(self) -> str:
+        if self.room is None:
+            return super().render_phase()
+        phase = str(self.room.get("phase", "")).upper()
+        return f"[bold cyan]▶ {phase}[/bold cyan]"
+
     def render_info(self) -> str:
         if self.room is None:
-            lines = [self.state.status_text(), f"Cursor: {format_position(self.cursor_row, self.cursor_col)}"]
+            lines = [
+                "[bold]Room[/bold]",
+                f"Status:   {self.state.status_text()}",
+                f"Cursor:   {format_position(self.cursor_row, self.cursor_col)}",
+                f"Last:     {self._last_move_text()}",
+            ]
             if self.session_token is not None:
-                lines.append(f"Reconnect token: {self.session_token}")
+                lines.append(f"Token:    {self.session_token}")
+            lines.extend(["", self.render_next_action()])
             return "\n".join(lines)
 
         scoreboard = self.room["scoreboard"]
         seats = {seat["player_color"]: seat for seat in self.room["seats"]}
         lines = [
-            f"Phase: {self.room['phase']}",
-            f"Round: {self.room['round_number']}",
-            f"Score B/W/D: {scoreboard['black_wins']}/{scoreboard['white_wins']}/{scoreboard['draws']}",
+            "[bold]Room[/bold]",
+            f"Phase:    {self.room['phase']}",
+            f"Round:    {self.room['round_number']}",
+            f"Score:    B/W/D {scoreboard['black_wins']}/{scoreboard['white_wins']}/{scoreboard['draws']}",
             self._seat_status(Player.BLACK, seats.get(Player.BLACK.value, {})),
             self._seat_status(Player.WHITE, seats.get(Player.WHITE.value, {})),
-            self.state.status_text(),
-            f"Cursor: {format_position(self.cursor_row, self.cursor_col)}",
+            f"Status:   {self.state.status_text()}",
+            f"Cursor:   {format_position(self.cursor_row, self.cursor_col)}",
+            f"Last:     {self._last_move_text()}",
         ]
         if self.local_player is not None:
-            lines.append(f"You are {self.local_player.label}.")
+            lines.append(f"You:      {self.local_player.label}")
         if self.session_token is not None:
-            lines.append(f"Reconnect token: {self.session_token}")
+            lines.append(f"Token:    {self.session_token}")
+        lines.extend(["", self.render_next_action()])
         return "\n".join(lines)
+
+    def render_next_action(self) -> str:
+        phase = "waiting_for_players" if self.room is None else str(self.room.get("phase", "waiting_for_players"))
+        if phase != "in_game":
+            return "[bold yellow]Next:[/bold yellow] Wait for the round to enter in_game."
+        if self.local_player is None:
+            return "[bold yellow]Next:[/bold yellow] Waiting for player assignment."
+        if self.state.current_player is self.local_player:
+            return "[bold green]Next:[/bold green] Aim for an open line and press Enter to submit."
+        return f"[bold yellow]Next:[/bold yellow] Waiting for {self.state.current_player.label}."
 
     def _seat_status(self, color: Player, seat: dict[str, Any]) -> str:
         name = seat.get("name") or "(empty)"
         online = "online" if seat.get("connected") else "offline"
         ready = "ready" if seat.get("ready") else "not ready"
-        return f"{color.label}: {name} [{online}, {ready}]"
+        return f"{color.stone} {color.label}: {name} [{online}, {ready}]"
 
     def action_confirm_action(self) -> None:
         phase = "waiting_for_players" if self.room is None else str(self.room.get("phase", "waiting_for_players"))

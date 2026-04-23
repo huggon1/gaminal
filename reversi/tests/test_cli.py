@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
-from reversi.cli import build_parser
+from reversi.cli import build_parser, main
 
 
 class ReversiCliTests(unittest.TestCase):
@@ -42,6 +43,21 @@ class ReversiCliTests(unittest.TestCase):
         self.assertEqual(args.command, "server")
         self.assertEqual(args.host, "0.0.0.0")
         self.assertEqual(args.port, 9001)
+
+    def test_server_returns_130_on_keyboard_interrupt(self) -> None:
+        server = MagicMock()
+        server.serve_game.side_effect = KeyboardInterrupt
+        with patch("reversi.cli.ReversiServer", return_value=server):
+            result = main(["server"])
+
+        self.assertEqual(result, 130)
+        server.shutdown.assert_called_once()
+
+    def test_client_returns_130_on_keyboard_interrupt(self) -> None:
+        with patch("reversi.ui.curses_app.run_remote_client", side_effect=KeyboardInterrupt):
+            result = main(["client", "--host", "127.0.0.1", "--port", "9001", "--name", "Alice"])
+
+        self.assertEqual(result, 130)
 
 
 if __name__ == "__main__":

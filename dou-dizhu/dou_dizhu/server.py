@@ -30,11 +30,7 @@ class _ConnectedClient:
 
     def close(self) -> None:
         try:
-            self.writer.close()
-        except OSError:
-            pass
-        try:
-            self.reader.close()
+            self.socket.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
         try:
@@ -57,6 +53,8 @@ class _Participant:
 
 
 class DdzServer:
+    AUTO_NEXT_ROUND_DELAY = 3.0
+
     def __init__(
         self,
         host: str,
@@ -82,6 +80,10 @@ class DdzServer:
         self._resume_phase: str | None = None
         self._deck_factory = deck_factory or create_shuffled_deck
         self._action_log: list[str] = []
+        self._round_number = 0
+        self._session_points: dict[int, int] = {1: 0, 2: 0, 3: 0}
+        self._session_wins: dict[int, int] = {1: 0, 2: 0, 3: 0}
+        self._pending_next_round_token = 0
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
@@ -121,6 +123,9 @@ class DdzServer:
                         continue
                     if event_type == "bot_action":
                         self._handle_bot_turn(payload)
+                        continue
+                    if event_type == "next_round":
+                        self._handle_next_round(payload)
                         continue
                     if client_id is None:
                         continue
@@ -254,6 +259,8 @@ class DdzServer:
             if self._phase == "paused_reconnect" and self._all_connected():
                 self._phase = self._resume_phase or self._phase_before_round()
                 self._message = f"{participant.name} reconnected. Round resumed."
+                if self._phase == "finished":
+                    self._schedule_next_round()
 
         self._ensure_bot_participants()
         self._send_welcome(client)
@@ -266,9 +273,10 @@ class DdzServer:
 
     def _start_round(self) -> None:
         self._round = DdzRoundState.from_deck(self._deck_factory())
+        self._round_number += 1
         self._phase = "bidding"
-        self._message = "Three players connected. Bidding starts at seat 1."
-        self._action_log = ["Round started. Bidding begins at seat 1."]
+        self._message = f"Round {self._round_number} started. Bidding begins at seat 1."
+        self._action_log = [f"Round {self._round_number} started. Bidding begins at seat 1."]
         self._broadcast_room_state()
         self._schedule_bot_turn_if_needed()
 
@@ -328,6 +336,7 @@ class DdzServer:
         self._message = f"Seat {participant.seat} played {' '.join(sort_cards(list(cards)))}."
         self._append_action_log(self._message)
         if self._round.phase == "finished":
+            self._finalize_round()
             self._message = f"Seat {participant.seat} won for the {self._round.winner_side} side."
             self._append_action_log(self._message)
         self._broadcast_room_state()
@@ -366,6 +375,46 @@ class DdzServer:
         if self._round is None:
             return "waiting_for_players"
         return self._round.phase
+
+    def _finalize_round(self) -> None:
+        if self._round is None or self._round.winner_seat is None:
+            return
+        winner_seat = self._round.winner_seat
+        landlord_seat = self._round.landlord_seat
+        stake = max(1, self._round.highest_bid)
+        self._session_wins[winner_seat] += 1
+        if landlord_seat is None:
+            return
+        if self._round.winner_side == "landlord":
+            self._session_points[landlord_seat] += 2 * stake
+            for seat in (1, 2, 3):
+                if seat != landlord_seat:
+                    self._session_points[seat] -= stake
+        else:
+            self._session_points[landlord_seat] -= 2 * stake
+            for seat in (1, 2, 3):
+                if seat != landlord_seat:
+                    self._session_points[seat] += stake
+        self._schedule_next_round()
+
+    def _schedule_next_round(self) -> None:
+        if self._events is None or self._phase == "closed":
+            return
+        self._pending_next_round_token += 1
+        token = self._pending_next_round_token
+
+        def enqueue_next_round() -> None:
+            if self._events is not None and not self._shutdown_event.is_set():
+                self._events.put(("next_round", None, token))
+
+        threading.Timer(self.AUTO_NEXT_ROUND_DELAY, enqueue_next_round).start()
+
+    def _handle_next_round(self, token: Any) -> None:
+        if token != self._pending_next_round_token:
+            return
+        if self._phase != "finished" or not self._all_connected():
+            return
+        self._start_round()
 
     def _broadcast_room_state(self, exclude_token: str | None = None) -> None:
         for participant in self._participants.values():
@@ -407,6 +456,11 @@ class DdzServer:
             "your_name": participant.name,
             "seats": seats,
             "action_log": list(self._action_log),
+            "session": {
+                "round_number": self._round_number,
+                "points": dict(self._session_points),
+                "wins": dict(self._session_wins),
+            },
             **round_snapshot,
         }
 
@@ -550,6 +604,7 @@ class DdzServer:
             self._message = f"Seat {participant.seat} played {' '.join(play)}."
             self._append_action_log(self._message)
             if self._round.phase == "finished":
+                self._finalize_round()
                 self._message = f"Seat {participant.seat} won for the {self._round.winner_side} side."
                 self._append_action_log(self._message)
         self._phase = self._round.phase

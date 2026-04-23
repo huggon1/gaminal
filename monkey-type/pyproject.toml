@@ -1,11 +1,10 @@
 [project]
-name = "terminal-dou-dizhu"
+name = "terminal-monkey-type"
 version = "0.1.0"
-description = "A terminal dou dizhu implementation."
+description = "A terminal typing speed test."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["textual>=0.65,<1.0"]
 
 [tool.uv]
 package = false
-cache-dir = ".uv-cache"

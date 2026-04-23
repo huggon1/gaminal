@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from bluff_cards.server import BluffServer
 
@@ -29,13 +30,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "server":
         server = BluffServer(args.host, args.port, players=args.players, bot_count=args.bots)
-        server.serve_game()
+        try:
+            server.serve_game()
+        except KeyboardInterrupt:
+            server.shutdown()
+            print("Bluff Cards server interrupted.", file=sys.stderr, flush=True)
+            return 130
         return 0
 
     if args.command == "client":
         from bluff_cards.ui import run_bluff_remote_client
 
-        return run_bluff_remote_client(args.host, args.port, args.name, args.theme)
+        try:
+            return run_bluff_remote_client(args.host, args.port, args.name, args.theme)
+        except KeyboardInterrupt:
+            print("Bluff Cards client interrupted.", file=sys.stderr, flush=True)
+            return 130
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

@@ -37,18 +37,22 @@ class LocalMinesweeperApp(ThemedApp):
             width: 1fr;
         }
 
+        #phase-view, #summary-view, #next-view {
+            height: auto;
+        }
+
         #board-view {
             text-style: bold;
-            text-wrap: nowrap;
         }
 
         #control-row {
             height: auto;
+            margin-top: 1;
         }
 
         #control-row Button {
             margin-right: 1;
-            min-width: 8;
+            min-width: 9;
         }
         """
     )
@@ -76,14 +80,21 @@ class LocalMinesweeperApp(ThemedApp):
         self.cursor_row = min(self.game.rows // 2, self.game.rows - 1)
         self.cursor_col = min(self.game.cols // 2, self.game.cols - 1)
         self.message = "Arrow keys move. Enter reveals. f toggles a flag."
+        self.rounds_started = 1
+        self.session_clears = 0
+        self.session_booms = 0
+        self._restart_token = 0
+        self._restart_countdown: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(f"Minesweeper [{self.config.title}]", id="app-title")
         with Horizontal(id="app-body"):
             with Vertical(classes="panel primary-panel", id="board-panel"):
+                yield Static("", id="phase-view")
                 yield Static("", id="board-view", classes="board-text")
             with Vertical(classes="panel side-panel", id="stats-panel"):
-                yield Static("", id="stats-view")
+                yield Static("", id="summary-view")
+                yield Static("", id="next-view")
                 with Horizontal(id="control-row"):
                     yield Button("Reveal", id="reveal")
                     yield Button("Flag", id="flag")
@@ -96,40 +107,64 @@ class LocalMinesweeperApp(ThemedApp):
         self.refresh_view()
 
     def refresh_view(self) -> None:
+        self.query_one("#phase-view", Static).update(self.render_phase())
         self.query_one("#board-view", Static).update(self.render_board())
-        stats = [
-            f"Board: {self.game.rows}x{self.game.cols}",
-            f"Mines: {self.game.mines}",
-            f"Remaining estimate: {self.game.remaining_mine_estimate()}",
-            f"Cursor: {format_position(self.cursor_row, self.cursor_col)}",
-            f"State: {self.game.status_text()}",
-            "",
-            "Controls:",
-            "  Arrows move",
-            "  Enter/Space reveal",
-            "  f toggles flag",
-            "  r restarts board",
-        ]
-        self.query_one("#stats-view", Static).update("\n".join(stats))
+        self.query_one("#summary-view", Static).update(self.render_summary())
+        self.query_one("#next-view", Static).update(self.render_next_action())
         self.update_status(self.message)
+
+    def render_phase(self) -> str:
+        if self.game.won:
+            return "[bold green]✦ BOARD CLEARED ✦[/bold green]"
+        if self.game.lost:
+            return "[bold red]★ BOOM ★[/bold red]"
+        if not self.game.initialized:
+            return "[bold cyan]▶ READY[/bold cyan]"
+        return "[bold cyan]▶ SWEEPING[/bold cyan]"
+
+    def render_summary(self) -> str:
+        return "\n".join(
+            [
+                "[bold]Session[/bold]",
+                f"Board:     {self.game.rows}x{self.game.cols}",
+                f"Mines:     {self.game.mines}",
+                f"Estimate:  {self.game.remaining_mine_estimate()}",
+                f"Flags:     {self.game.flags_placed}",
+                f"Cursor:    {format_position(self.cursor_row, self.cursor_col)}",
+                f"Rounds:    {self.rounds_started}",
+                f"Clears:    {self.session_clears}",
+                f"Booms:     {self.session_booms}",
+                f"State:     {self.game.status_text()}",
+            ]
+        )
+
+    def render_next_action(self) -> str:
+        if self.game.finished and self._restart_countdown is not None:
+            return f"[bold yellow]Next:[/bold yellow] Fresh board in {self._restart_countdown}s."
+        if self.game.finished:
+            return "[bold yellow]Next:[/bold yellow] Waiting to restart."
+        if not self.game.initialized:
+            return "[bold green]Next:[/bold green] Reveal a safe-looking opener."
+        return "[bold green]Next:[/bold green] Reveal with Enter, mark mines with f, chord revealed numbers when ready."
 
     def render_board(self) -> Text:
         compact = self.should_render_compact_board()
         board = Text()
         if compact:
-            board.append("   " + "".join(compact_column_label(col) for col in range(self.game.cols)))
+            board.append("   " + "".join(compact_column_label(col) for col in range(self.game.cols)), style="dim")
         else:
-            board.append("    " + " ".join(column_label(col).rjust(3) for col in range(self.game.cols)))
+            board.append("    " + " ".join(column_label(col).rjust(3) for col in range(self.game.cols)), style="dim")
         board.append("\n")
         for row in range(self.game.rows):
-            board.append(f"{row + 1:>2} " if compact else f"{row + 1:>3} ")
+            board.append(f"{row + 1:>2} " if compact else f"{row + 1:>3} ", style="dim")
             for col in range(self.game.cols):
                 symbol = self.cell_symbol(row, col)
-                token = symbol if compact else f" {symbol} "
-                if row == self.cursor_row and col == self.cursor_col:
-                    board.append(token, style="reverse")
-                else:
-                    board.append(token)
+                is_cursor = row == self.cursor_row and col == self.cursor_col
+                token = self.cell_token(symbol, compact=compact, cursor=is_cursor)
+                style = self.cell_style(symbol)
+                if is_cursor:
+                    style = self.cursor_style(symbol, style)
+                board.append(token, style=style)
             if row < self.game.rows - 1:
                 board.append("\n")
         return board
@@ -160,6 +195,40 @@ class LocalMinesweeperApp(ThemedApp):
             return " "
         return str(cell.adjacent_mines)
 
+    @staticmethod
+    def cell_style(symbol: str) -> str:
+        styles = {
+            "#": "dim white",
+            "F": "bold yellow",
+            "*": "bold red",
+            "!": "bold bright_red",
+            "x": "bold bright_red",
+            "1": "bold cyan",
+            "2": "bold green",
+            "3": "bold yellow",
+            "4": "bold magenta",
+            "5": "bold red",
+            "6": "bold bright_cyan",
+            "7": "bold bright_yellow",
+            "8": "bold white",
+            " ": "dim #31425f",
+        }
+        return styles.get(symbol, "white")
+
+    @staticmethod
+    def cell_token(symbol: str, *, compact: bool, cursor: bool) -> str:
+        if compact:
+            return "." if symbol == " " else symbol
+        if cursor and symbol == " ":
+            return f"[{symbol}]"
+        return f" {symbol} "
+
+    @staticmethod
+    def cursor_style(symbol: str, base_style: str) -> str:
+        if symbol == " ":
+            return "bold black on bright_cyan"
+        return f"{base_style} on #1a2740"
+
     def move_cursor(self, delta_row: int, delta_col: int) -> None:
         self.cursor_row = (self.cursor_row + delta_row) % self.game.rows
         self.cursor_col = (self.cursor_col + delta_col) % self.game.cols
@@ -184,8 +253,14 @@ class LocalMinesweeperApp(ThemedApp):
         except ValueError as exc:
             self.message = str(exc)
         else:
-            if self.game.finished:
-                self.message = self.game.status_text()
+            if self.game.won:
+                self.session_clears += 1
+                self.message = "Board cleared. Next board queued."
+                self._schedule_auto_restart()
+            elif self.game.lost:
+                self.session_booms += 1
+                self.message = "Boom. Next board queued."
+                self._schedule_auto_restart()
             elif was_revealed and revealed:
                 self.message = f"Opened {len(revealed)} adjacent cells."
             elif was_revealed:
@@ -206,11 +281,7 @@ class LocalMinesweeperApp(ThemedApp):
         self.refresh_view()
 
     def action_restart_board(self) -> None:
-        self.game.restart()
-        self.cursor_row = min(self.game.rows // 2, self.game.rows - 1)
-        self.cursor_col = min(self.game.cols // 2, self.game.cols - 1)
-        self.message = "Started a new board."
-        self.refresh_view()
+        self._restart_round(manual=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "reveal":
@@ -219,6 +290,39 @@ class LocalMinesweeperApp(ThemedApp):
             self.action_toggle_flag()
         elif event.button.id == "restart":
             self.action_restart_board()
+
+    def _schedule_auto_restart(self) -> None:
+        self._restart_token += 1
+        token = self._restart_token
+        self._restart_countdown = 5
+        for index, seconds_left in enumerate(range(5, 0, -1)):
+            self.set_timer(
+                float(index),
+                lambda remaining=seconds_left, countdown_token=token: self._set_restart_countdown(countdown_token, remaining),
+            )
+        self.set_timer(5.0, lambda countdown_token=token: self._auto_restart(countdown_token))
+        self.refresh_view()
+
+    def _set_restart_countdown(self, token: int, seconds_left: int) -> None:
+        if token != self._restart_token:
+            return
+        self._restart_countdown = seconds_left
+        self.refresh_view()
+
+    def _auto_restart(self, token: int) -> None:
+        if token != self._restart_token:
+            return
+        self._restart_round(manual=False)
+
+    def _restart_round(self, *, manual: bool) -> None:
+        self._restart_token += 1
+        self._restart_countdown = None
+        self.game.restart()
+        self.cursor_row = min(self.game.rows // 2, self.game.rows - 1)
+        self.cursor_col = min(self.game.cols // 2, self.game.cols - 1)
+        self.rounds_started += 1
+        self.message = "Started a new board." if manual else "Fresh board started."
+        self.refresh_view()
 
 
 def column_label(col: int) -> str:

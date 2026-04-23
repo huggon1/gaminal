@@ -1,6 +1,9 @@
 from .client import BluffClientConnection
 from .core import (
+    CARDS_PER_PLAYER,
+    CARDS_PER_RANK,
     DEFAULT_LIVES,
+    JOKER_COUNT,
     TABLE_RANKS,
     BluffClaim,
     BluffRoundState,
@@ -16,7 +19,10 @@ __all__ = [
     "BluffRevealResult",
     "BluffRoundState",
     "BluffServer",
+    "CARDS_PER_PLAYER",
+    "CARDS_PER_RANK",
     "DEFAULT_LIVES",
+    "JOKER_COUNT",
     "TABLE_RANKS",
     "create_shuffled_deck",
     "is_truthful_claim",

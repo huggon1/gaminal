@@ -1,6 +1,6 @@
 # Bluff Cards
 
-A terminal bluff card game for Linux.
+A terminal bluff card game.
 
 ## Requirements
 

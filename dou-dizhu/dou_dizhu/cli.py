@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from dou_dizhu.server import DdzServer
 
@@ -28,13 +29,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "server":
         server = DdzServer(args.host, args.port, bot_count=args.bots)
-        server.serve_game()
+        try:
+            server.serve_game()
+        except KeyboardInterrupt:
+            server.shutdown()
+            print("Dou Dizhu server interrupted.", file=sys.stderr, flush=True)
+            return 130
         return 0
 
     if args.command == "client":
         from dou_dizhu.ui import run_ddz_remote_client
 
-        return run_ddz_remote_client(args.host, args.port, args.name, args.theme)
+        try:
+            return run_ddz_remote_client(args.host, args.port, args.name, args.theme)
+        except KeyboardInterrupt:
+            print("Dou Dizhu client interrupted.", file=sys.stderr, flush=True)
+            return 130
 
     parser.error(f"Unsupported command: {args.command}")
     return 2

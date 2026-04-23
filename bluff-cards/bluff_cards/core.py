@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 TABLE_RANKS = ("A", "K", "Q")
 DEFAULT_LIVES = 3
 MAX_PLAY_COUNT = 3
+CARDS_PER_PLAYER = 5          # fixed hand size — never changes when players are eliminated
+CARDS_PER_RANK = 6            # six of each table rank (A, K, Q)
+JOKER_COUNT = 2               # jokers act as wildcards for any rank
 RANK_ORDER = {"Q": 12, "K": 13, "A": 14, "JOKER": 15}
 
 
@@ -36,27 +39,104 @@ def is_truthful_claim(cards: list[str], table_rank: str) -> bool:
     return all(card_rank(card) in {table_rank, "JOKER"} for card in cards)
 
 
-def choose_basic_claim(hand: list[str], table_rank: str) -> list[str]:
+def choose_basic_claim(
+    hand: list[str],
+    table_rank: str,
+    *,
+    rng: random.Random | None = None,
+) -> list[str]:
     if not hand:
         raise ValueError("Cannot choose a claim from an empty hand.")
 
     truthful_cards = [card for card in sort_cards(hand) if card_rank(card) in {table_rank, "JOKER"}]
+
+    if rng is None:
+        # Deterministic fallback (used by tests).
+        if truthful_cards:
+            return truthful_cards[: min(MAX_PLAY_COUNT, len(truthful_cards))]
+        bluff_cards = sort_cards(hand)[: min(MAX_PLAY_COUNT, len(hand))]
+        return bluff_cards[:1] if len(bluff_cards) > 1 else bluff_cards
+
+    # ── Smart random strategy ────────────────────────────────────────────
+    other_cards = [c for c in hand if card_rank(c) not in {table_rank, "JOKER"}]
+    max_count = min(MAX_PLAY_COUNT, len(hand))
+
     if truthful_cards:
-        return truthful_cards[: min(MAX_PLAY_COUNT, len(truthful_cards))]
+        # Vary how many matching cards to play (save some for later rounds).
+        n = len(truthful_cards)
+        if n == 1:
+            play_count = 1
+        elif n == 2:
+            play_count = rng.choices([1, 2], weights=[0.45, 0.55])[0]
+        else:
+            play_count = rng.choices([1, 2, 3], weights=[0.30, 0.45, 0.25])[0]
 
-    bluff_cards = sort_cards(hand)[: min(MAX_PLAY_COUNT, len(hand))]
-    return bluff_cards[:1] if len(bluff_cards) > 1 else bluff_cards
+        # Occasionally slip in a bluff card to create ambiguity for opponents.
+        if other_cards and play_count < max_count and rng.random() < 0.18:
+            honest_take = max(1, play_count - 1)
+            chosen = rng.sample(truthful_cards, min(honest_take, len(truthful_cards)))
+            chosen += rng.sample(other_cards, 1)
+            return sort_cards(chosen[:MAX_PLAY_COUNT])
+
+        return sort_cards(rng.sample(truthful_cards, min(play_count, len(truthful_cards))))
+
+    # Pure bluff: vary count based on boldness and hand size.
+    if max_count == 1:
+        play_count = 1
+    elif max_count == 2:
+        play_count = rng.choices([1, 2], weights=[0.60, 0.40])[0]
+    else:
+        play_count = rng.choices([1, 2, 3], weights=[0.50, 0.33, 0.17])[0]
+
+    return sort_cards(rng.sample(hand, min(play_count, len(hand))))
 
 
-def should_basic_challenge(hand: list[str], table_rank: str, claimed_count: int, claimer_hand_count: int) -> bool:
-    matching_cards = sum(1 for card in hand if card_rank(card) in {table_rank, "JOKER"})
+def should_basic_challenge(
+    hand: list[str],
+    table_rank: str,
+    claimed_count: int,
+    claimer_hand_count: int,
+    *,
+    rng: random.Random | None = None,
+) -> bool:
+    # Forced: the claimer just played their last cards.
     if claimer_hand_count == 0:
         return True
-    if matching_cards == 0 and claimed_count >= 2:
-        return True
-    if matching_cards <= 1 and claimed_count == 3:
-        return True
-    return False
+
+    if rng is None:
+        # Deterministic fallback (used by tests).
+        matching_cards = sum(1 for card in hand if card_rank(card) in {table_rank, "JOKER"})
+        if matching_cards == 0 and claimed_count >= 2:
+            return True
+        if matching_cards <= 1 and claimed_count == 3:
+            return True
+        return False
+
+    # ── Smart probabilistic strategy ────────────────────────────────────
+    matching = sum(1 for card in hand if card_rank(card) in {table_rank, "JOKER"})
+    # 8 cards total can satisfy the table rank (6 of that rank + 2 jokers).
+    TOTAL_MATCHING = 8
+
+    # Start from a low base probability and accumulate suspicion.
+    prob = 0.10
+
+    # The more matching cards we hold, the fewer are available for the claimer.
+    prob += (matching / TOTAL_MATCHING) * 0.38
+
+    # Larger claims are harder to make honestly.
+    prob += {1: 0.0, 2: 0.09, 3: 0.22}.get(claimed_count, 0.0)
+
+    # A claimer with few cards left may be playing desperately.
+    if claimer_hand_count <= 2:
+        prob += 0.12
+    elif claimer_hand_count <= 4:
+        prob += 0.04
+
+    # Apply random jitter so identical situations don't always produce the same choice.
+    prob += rng.uniform(-0.08, 0.08)
+    prob = max(0.04, min(0.90, prob))
+
+    return rng.random() < prob
 
 
 @dataclass(frozen=True)
@@ -95,12 +175,11 @@ class BluffRoundState:
     def from_deck(cls, deck: list[str], player_count: int, lives: int = DEFAULT_LIVES, table_rank: str | None = None) -> "BluffRoundState":
         if player_count < 2 or player_count > 4:
             raise ValueError("Player count must be between 2 and 4.")
-        cards_per_player = len(deck) // player_count
         hands: dict[int, list[str]] = {}
         index = 0
         for seat in range(1, player_count + 1):
-            hands[seat] = sort_cards(deck[index : index + cards_per_player])
-            index += cards_per_player
+            hands[seat] = sort_cards(deck[index : index + CARDS_PER_PLAYER])
+            index += CARDS_PER_PLAYER
         discard = sort_cards(deck[index:])
         return cls(
             hands=hands,
@@ -185,6 +264,10 @@ class BluffRoundState:
         return result
 
     def seat_snapshot(self, seat: int) -> dict[str, object]:
+        # Count how many cards in the discard pile match the current table rank.
+        discard_matching = sum(
+            1 for c in self.discard_pile if card_rank(c) in {self.table_rank, "JOKER"}
+        )
         return {
             "current_turn": self.current_turn,
             "table_rank": self.table_rank,
@@ -199,17 +282,19 @@ class BluffRoundState:
             "your_hand": list(self.hands[seat]),
             "lives": dict(self.lives),
             "discard_count": len(self.discard_pile),
+            "discard_matching": discard_matching,
         }
 
     def _redeal_for_next_round(self, starting_seat: int) -> None:
         active = self.active_seats()
         deck = create_shuffled_deck()
-        cards_per_player = len(deck) // len(active)
+        # Always deal exactly CARDS_PER_PLAYER cards per active seat.
+        # Eliminated seats receive no cards; surplus goes to the discard pile.
         next_hands = {seat: [] for seat in self.hands}
         index = 0
         for seat in active:
-            next_hands[seat] = sort_cards(deck[index : index + cards_per_player])
-            index += cards_per_player
+            next_hands[seat] = sort_cards(deck[index : index + CARDS_PER_PLAYER])
+            index += CARDS_PER_PLAYER
         self.hands = next_hands
         self.discard_pile = sort_cards(deck[index:])
         self.table_rank = random.choice(TABLE_RANKS)

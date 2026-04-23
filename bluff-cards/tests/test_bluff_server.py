@@ -56,7 +56,7 @@ class BluffServerIntegrationTests(unittest.TestCase):
             self._cleanup(server, thread, alice)
 
     def test_bot_challenges_impossible_claim(self) -> None:
-        server = BluffServer("127.0.0.1", 0, players=3, bot_count=2)
+        server = BluffServer("127.0.0.1", 0, players=3, bot_count=2, bot_delay=0.05)
         server._events = queue.Queue()
         server._participants["human-token"] = _Participant(
             seat=1,
@@ -174,7 +174,7 @@ class BluffServerIntegrationTests(unittest.TestCase):
             self._cleanup(server, thread, alice, replacement)
 
     def test_room_snapshot_includes_recent_action_log(self) -> None:
-        server = BluffServer("127.0.0.1", 0, players=3, bot_count=2)
+        server = BluffServer("127.0.0.1", 0, players=3, bot_count=2, bot_delay=0.05)
         participant = _Participant(
             seat=1,
             name="Alice",
@@ -215,7 +215,7 @@ class BluffServerIntegrationTests(unittest.TestCase):
             self._cleanup(server, thread, alice, bob)
 
     def _start_server(self, players: int, deck_factory, bot_count: int = 0) -> tuple[BluffServer, threading.Thread]:
-        server = BluffServer("127.0.0.1", 0, players=players, deck_factory=deck_factory, bot_count=bot_count)
+        server = BluffServer("127.0.0.1", 0, players=players, deck_factory=deck_factory, bot_count=bot_count, bot_delay=0.05)
         thread = threading.Thread(target=server.serve_game, daemon=True)
         thread.start()
         ready = server.ready_event.wait(timeout=2)

@@ -15,6 +15,10 @@ class DdzRemoteApp(ThemedApp):
     CSS = (
         COMMON_CSS
         + """
+        #phase-view, #session-view, #table-view, #summary-view, #hand-view, #next-view {
+            height: auto;
+        }
+
         #hand-panel {
             width: 1fr;
         }
@@ -22,6 +26,7 @@ class DdzRemoteApp(ThemedApp):
         #action-grid {
             height: auto;
             layout: vertical;
+            margin-top: 1;
         }
 
         .action-row {
@@ -65,15 +70,19 @@ class DdzRemoteApp(ThemedApp):
         yield Static("Dou Dizhu", id="app-title")
         with Horizontal(id="app-body"):
             with Vertical(classes="panel primary-panel"):
+                yield Static("", id="phase-view")
+                yield Static("", id="session-view")
                 yield Static("", id="table-view", classes="board-text")
             with Vertical(classes="panel side-panel", id="hand-panel"):
+                yield Static("", id="summary-view")
                 yield Static("", id="hand-view")
+                yield Static("", id="next-view")
                 with Vertical(id="action-grid"):
-                    with Horizontal(classes="action-row"):
+                    with Horizontal(classes="action-row", id="play-row"):
                         yield Button("Play", id="play")
                         yield Button("Pass", id="pass")
                         yield Button("Clear", id="clear")
-                    with Horizontal(classes="action-row"):
+                    with Horizontal(classes="action-row", id="bid-row"):
                         yield Button("Bid 0", id="bid-0")
                         yield Button("Bid 1", id="bid-1")
                         yield Button("Bid 2", id="bid-2")
@@ -126,6 +135,16 @@ class DdzRemoteApp(ThemedApp):
             return []
         return list(self.room.get("your_hand", []))
 
+    def render_phase(self) -> str:
+        if self.room is None:
+            return "[bold yellow]… CONNECTING …[/bold yellow]"
+        phase = str(self.room.get("phase", "")).upper()
+        if phase == "FINISHED":
+            return "[bold green]✦ ROUND FINISHED ✦[/bold green]"
+        if phase == "PAUSED_RECONNECT":
+            return "[bold yellow]⏸ WAITING FOR RECONNECT[/bold yellow]"
+        return f"[bold cyan]▶ {phase}[/bold cyan]"
+
     def render_table(self) -> str:
         if self.room is None:
             return "\n".join(
@@ -144,43 +163,69 @@ class DdzRemoteApp(ThemedApp):
             role = "landlord" if seat.get("is_landlord") else "farmer"
             status = "online" if seat.get("connected") else "offline"
             seats.append(f"S{seat['seat']} {seat.get('name') or '(empty)'} [{role}, {status}, cards={seat.get('hand_count', '-')}]")
-        table_cards = " ".join(self.room.get("table_cards", [])) or "(none)"
-        bottom = " ".join(self.room.get("bottom_cards", [])) or "(hidden)"
-        hand_counts = self.room.get("hand_counts", {})
         action_log = self.room.get("action_log", [])
         lines = [
-            f"Phase: {self.room['phase']}",
-            f"You: seat {self.room['you_seat']} {self.room['your_name']}",
-            self.render_instruction(),
             "Seats:",
             *seats,
-            "",
-            f"Current turn: seat {self.room.get('current_turn')}",
-            f"Highest bid: {self.room.get('highest_bid')} by {self.room.get('highest_bidder')}",
-            f"Landlord: {self.room.get('landlord_seat')}",
-            f"Bottom cards: {bottom}",
-            f"Table: seat {self.room.get('table_seat')} -> {table_cards}",
-            f"Hand counts: S1={hand_counts.get(1, '-')}  S2={hand_counts.get(2, '-')}  S3={hand_counts.get(3, '-')}",
             "",
             "Recent actions:",
             *(f"- {entry}" for entry in action_log[-8:]),
         ]
         if self.room.get("winner_seat") is not None:
+            lines.append("")
             lines.append(f"Winner: seat {self.room['winner_seat']} ({self.room['winner_side']})")
         return "\n".join(lines)
+
+    def render_session(self) -> str:
+        if self.room is None:
+            return "[bold]Session[/bold]\nRound: 0\nPoints: waiting\nWins: waiting"
+        session = self.room.get("session", {})
+        points = session.get("points", {})
+        wins = session.get("wins", {})
+        you_seat = self.room.get("you_seat")
+        your_points = self._seat_value(points, you_seat, 0)
+        your_wins = self._seat_value(wins, you_seat, 0)
+        return "\n".join(
+            [
+                "[bold]Session[/bold]",
+                f"Round:      {session.get('round_number', 0)}",
+                f"Your score: {your_points:+d}",
+                f"Your wins:  {your_wins}",
+                f"Seat pts:   S1={self._seat_value(points, 1, 0):+d}  S2={self._seat_value(points, 2, 0):+d}  S3={self._seat_value(points, 3, 0):+d}",
+                f"Seat wins:  S1={self._seat_value(wins, 1, 0)}  S2={self._seat_value(wins, 2, 0)}  S3={self._seat_value(wins, 3, 0)}",
+            ]
+        )
+
+    def render_summary(self) -> str:
+        if self.room is None:
+            return "[bold]Table[/bold]\nWaiting for room snapshot."
+        table_cards = " ".join(self.room.get("table_cards", [])) or "(none)"
+        bottom = " ".join(self.room.get("bottom_cards", [])) or "(hidden)"
+        hand_counts = self.room.get("hand_counts", {})
+        return "\n".join(
+            [
+                "[bold]Table[/bold]",
+                f"You:        seat {self.room['you_seat']} {self.room['your_name']}",
+                f"Turn:       seat {self.room.get('current_turn')}",
+                f"Highest bid:{self.room.get('highest_bid')} by {self.room.get('highest_bidder')}",
+                f"Landlord:   {self.room.get('landlord_seat')}",
+                f"Bottom:     {bottom}",
+                f"Table:      seat {self.room.get('table_seat')} -> {table_cards}",
+                f"Counts:     S1={self._seat_value(hand_counts, 1, '-')}  S2={self._seat_value(hand_counts, 2, '-')}  S3={self._seat_value(hand_counts, 3, '-')}",
+            ]
+        )
 
     def render_hand(self) -> str:
         hand = self.current_hand()
         if not hand:
             return "Your hand:\n  (empty)"
         lines = [
-            "Your hand:",
-            "  > cursor   * selected",
-            "  Select cards with Space. Press p to play the selected set.",
+            f"Your hand ({len(hand)} cards):",
+            "  ▶ cursor   ✓ selected",
         ]
         for index, card in enumerate(hand):
-            pointer = ">" if index == self.cursor_index else " "
-            chosen = "*" if index in self.selected_indexes else " "
+            pointer = "▶" if index == self.cursor_index else " "
+            chosen = "✓" if index in self.selected_indexes else " "
             lines.append(f"{pointer}{chosen} {index + 1:>2}. {card}")
         return "\n".join(lines)
 
@@ -204,7 +249,7 @@ class DdzRemoteApp(ThemedApp):
             return f"Next: wait for seat {current_turn} to bid."
         if phase == "playing":
             if self.room.get("winner_seat") is not None:
-                return "Next: round finished. Press q to quit, or restart the room from the server."
+                return "Next: round finished. Scores are updated automatically and the next deal will begin soon."
             if current_turn == you_seat:
                 table_seat = self.room.get("table_seat")
                 if table_seat is None:
@@ -212,15 +257,44 @@ class DdzRemoteApp(ThemedApp):
                 return "Next: respond to the table. Select a stronger valid set, then press p. Press a to pass."
             return f"Next: wait for seat {current_turn} to act."
         if phase == "finished":
-            return "Next: round finished. Press q to quit."
+            return "Next: round finished. Scores are updated automatically and the next deal will begin soon."
         if phase == "closed":
             return "Next: room closed. Press q to quit."
         return "Next: follow the status message below."
 
     def refresh_view(self) -> None:
+        self.query_one("#phase-view", Static).update(self.render_phase())
+        self.query_one("#session-view", Static).update(self.render_session())
         self.query_one("#table-view", Static).update(self.render_table())
+        self.query_one("#summary-view", Static).update(self.render_summary())
         self.query_one("#hand-view", Static).update(self.render_hand())
+        self.query_one("#next-view", Static).update(self.render_instruction())
+        self.refresh_action_rows()
         self.update_status(self.message)
+
+    def current_phase(self) -> str:
+        if self.room is None:
+            return "connecting"
+        return str(self.room.get("phase", ""))
+
+    def should_show_bid_actions(self) -> bool:
+        return not self.disconnected and self.current_phase() == "bidding"
+
+    def should_show_play_actions(self) -> bool:
+        return not self.disconnected and self.current_phase() == "playing"
+
+    def refresh_action_rows(self) -> None:
+        self.query_one("#bid-row", Horizontal).display = self.should_show_bid_actions()
+        self.query_one("#play-row", Horizontal).display = self.should_show_play_actions()
+
+    @staticmethod
+    def _seat_value(mapping: dict[Any, Any], seat: Any, default: Any) -> Any:
+        if seat in mapping:
+            return mapping[seat]
+        seat_text = str(seat)
+        if seat_text in mapping:
+            return mapping[seat_text]
+        return default
 
     def move_cursor(self, delta: int) -> None:
         hand = self.current_hand()
