@@ -39,6 +39,7 @@ class LocalMinesweeperApp(ThemedApp):
 
         #board-view {
             text-style: bold;
+            text-wrap: nowrap;
         }
 
         #control-row {
@@ -113,14 +114,18 @@ class LocalMinesweeperApp(ThemedApp):
         self.update_status(self.message)
 
     def render_board(self) -> Text:
+        compact = self.should_render_compact_board()
         board = Text()
-        board.append("    " + " ".join(column_label(col).rjust(3) for col in range(self.game.cols)))
+        if compact:
+            board.append("   " + "".join(compact_column_label(col) for col in range(self.game.cols)))
+        else:
+            board.append("    " + " ".join(column_label(col).rjust(3) for col in range(self.game.cols)))
         board.append("\n")
         for row in range(self.game.rows):
-            board.append(f"{row + 1:>3} ")
+            board.append(f"{row + 1:>2} " if compact else f"{row + 1:>3} ")
             for col in range(self.game.cols):
                 symbol = self.cell_symbol(row, col)
-                token = f" {symbol} "
+                token = symbol if compact else f" {symbol} "
                 if row == self.cursor_row and col == self.cursor_col:
                     board.append(token, style="reverse")
                 else:
@@ -128,6 +133,16 @@ class LocalMinesweeperApp(ThemedApp):
             if row < self.game.rows - 1:
                 board.append("\n")
         return board
+
+    def should_render_compact_board(self, width: int | None = None) -> bool:
+        width = self.size.width if width is None else width
+        if width <= 0:
+            return False
+        stats_panel = 26
+        board_budget = max(0, width - stats_panel)
+        regular_width = max(4 * self.game.cols + 3, 3 * self.game.cols + 4)
+        compact_width = self.game.cols + 3
+        return regular_width > board_budget >= compact_width
 
     def cell_symbol(self, row: int, col: int) -> str:
         cell = self.game.grid[row][col]
@@ -219,6 +234,11 @@ def column_label(col: int) -> str:
 
 def format_position(row: int, col: int) -> str:
     return f"{column_label(col)}{row + 1}"
+
+
+def compact_column_label(col: int) -> str:
+    symbols = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return symbols[col % len(symbols)]
 
 
 def resolve_config(
