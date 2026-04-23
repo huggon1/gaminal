@@ -1,0 +1,10 @@
+[project]
+name = "terminal-reversi"
+version = "0.1.0"
+description = "A standard-library-only terminal reversi implementation for Linux."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["textual>=0.65,<1.0"]
+
+[tool.uv]
+package = false
