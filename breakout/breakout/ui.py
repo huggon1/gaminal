@@ -18,15 +18,43 @@ POWERUP_DISPLAY = {
 }
 
 BRICK_DISPLAY = {
-    1: ("■", "bold white"),
-    2: ("▪", "bold yellow"),
-    3: ("▣", "bold red"),
-    -1: ("▒", "dim"),
+    1: ("░", "bold white"),
+    2: ("▒", "bold yellow"),
+    3: ("▓", "bold red"),
+    -1: ("■", "dim"),
 }
 
 
 class BreakoutApp(ThemedApp):
-    CSS = COMMON_CSS
+    CSS = (
+        COMMON_CSS
+        + """
+        #phase-view {
+            height: auto;
+            padding-bottom: 1;
+        }
+
+        #board-view {
+            height: 1fr;
+            width: auto;
+            content-align: left top;
+        }
+
+        #summary-view, #next-view {
+            height: auto;
+        }
+
+        #control-row {
+            height: auto;
+            margin-top: 1;
+        }
+
+        #control-row Button {
+            margin-right: 1;
+            min-width: 11;
+        }
+        """
+    )
     BINDINGS = ThemedApp.BINDINGS + [
         Binding("left", "move_left", show=False),
         Binding("right", "move_right", show=False),
@@ -41,61 +69,101 @@ class BreakoutApp(ThemedApp):
         super().__init__(theme=theme)
         self.game = BreakoutGame(rows=rows, cols=cols)
         self.paused = False
+        self.message = "Break the wall and keep the ball alive."
+        self.session_best = 0
+        self.rounds_started = 1
+        self._restart_token = 0
+        self._restart_countdown: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("Breakout", id="app-title")
         with Horizontal(id="app-body"):
             with Vertical(classes="panel primary-panel"):
-                yield Static("", id="board-view")
+                yield Static("", id="phase-view")
+                yield Static("", id="board-view", classes="board-text")
             with Vertical(classes="panel side-panel"):
-                yield Static("", id="stats-view")
-                yield Button("Pause/Resume", id="pause")
-                yield Button("Restart", id="restart")
+                yield Static("", id="summary-view")
+                yield Static("", id="next-view")
+                with Horizontal(id="control-row"):
+                    yield Button("Pause", id="pause")
+                    yield Button("Restart", id="restart")
         yield Static("", id="help-panel")
         yield Static("", id="status-bar")
 
     def on_mount(self) -> None:
         super().on_mount()
         self.set_interval(0.08, self.on_tick)
-        self.refresh_view("Running")
+        self.refresh_view()
 
     def on_tick(self) -> None:
-        if self.paused or self.game.game_over or self.game.won:
+        if self.paused or self._restart_countdown is not None or self.game.game_over or self.game.won:
             return
+        previous_score = self.game.score
+        previous_level = self.game.level
+        previous_lives = self.game.lives
+        previous_effects = set(self.game.active_effects)
         self.game.step()
-        if self.game.won:
-            self.refresh_view("You win!")
-        elif self.game.game_over:
-            self.refresh_view("Game over")
-        else:
-            self.refresh_view("Running")
+        self.session_best = max(self.session_best, self.game.score)
+        if self.game.game_over:
+            self.message = "Last life lost. New wall incoming."
+            self._schedule_auto_restart()
+        elif self.game.level != previous_level:
+            self.message = f"Level up. Welcome to wall {self.game.level}."
+        elif self.game.lives < previous_lives:
+            self.message = f"Ball lost. {self.game.lives} life left."
+        elif set(self.game.active_effects) != previous_effects:
+            active = ", ".join(sorted(self.game.active_effects)) or "none"
+            self.message = f"Power-up state changed: {active}."
+        elif self.game.score > previous_score:
+            self.message = f"Brick hit. Combo x{self.game._combo_multiplier()}."
+        self.refresh_view()
 
-    def refresh_view(self, message: str) -> None:
+    def refresh_view(self) -> None:
+        self.query_one("#phase-view", Static).update(self.render_phase())
         self.query_one("#board-view", Static).update(self.render_board())
-        self.query_one("#stats-view", Static).update(self._render_stats())
-        self.update_status(message)
+        self.query_one("#summary-view", Static).update(self.render_summary())
+        self.query_one("#next-view", Static).update(self.render_next_action())
+        self.update_status(self.message)
 
-    def _render_stats(self) -> str:
+    def render_phase(self) -> str:
+        if self.game.game_over:
+            return "[bold red]★ GAME OVER ★[/bold red]"
+        if self.paused:
+            return "[bold yellow]⏸ PAUSED[/bold yellow]"
+        return f"[bold cyan]▶ LEVEL {self.game.level}[/bold cyan]"
+
+    def render_summary(self) -> str:
         g = self.game
         state = "Won!" if g.won else ("Game Over" if g.game_over else ("Paused" if self.paused else "Running"))
-        mult = g._combo_multiplier()
-        combo_str = f"{g.combo}x (×{mult})" if g.combo > 0 else "—"
-
+        combo_bar = self._bar(min(g.combo, 10), goal=10, width=10)
         effects = []
-        for k, ticks in g.active_effects.items():
-            secs = round(ticks * 0.08)
-            effects.append(f"{k}({secs}s)")
-        effect_str = ", ".join(effects) if effects else "—"
-
-        return (
-            f"Score:  {g.score}\n"
-            f"Lives:  {'♥ ' * g.lives}\n"
-            f"Level:  {g.level}\n"
-            f"Bricks: {g.brick_count}\n"
-            f"Combo:  {combo_str}\n"
-            f"Effect: {effect_str}\n"
-            f"State:  {state}"
+        for kind, ticks in sorted(g.active_effects.items()):
+            secs = max(1, round(ticks * 0.08))
+            effects.append(f"{kind} {secs}s")
+        effect_str = ", ".join(effects) if effects else "none"
+        hearts = "♥" * g.lives + "♡" * max(0, 5 - g.lives)
+        return "\n".join(
+            [
+                "[bold]Session[/bold]",
+                f"Score:    {g.score}",
+                f"Best:     {max(self.session_best, g.score)}",
+                f"Rounds:   {self.rounds_started}",
+                f"Lives:    {hearts}",
+                f"Bricks:   {g.brick_count}",
+                f"Combo:    x{g._combo_multiplier()}  {combo_bar}",
+                f"Effects:  {effect_str}",
+                f"State:    {state}",
+            ]
         )
+
+    def render_next_action(self) -> str:
+        if self.game.game_over and self._restart_countdown is not None:
+            return f"[bold yellow]Next:[/bold yellow] Fresh wall in {self._restart_countdown}s."
+        if self.game.game_over:
+            return "[bold yellow]Next:[/bold yellow] Waiting to restart."
+        if self.paused:
+            return "[bold yellow]Next:[/bold yellow] Press Space to resume the volley."
+        return "[bold green]Next:[/bold green] Keep the paddle centered under the hottest ball."
 
     def render_board(self) -> Text:
         txt = Text()
@@ -106,58 +174,97 @@ class BreakoutApp(ThemedApp):
             ball_cells.add((int(ball.row), int(ball.col)))
 
         powerup_cells: dict[tuple[int, int], tuple[str, str]] = {}
-        for pu in g.powerups:
-            pr, pc = int(pu.row), int(pu.col)
-            ch, style = POWERUP_DISPLAY.get(pu.kind, ("?", "bold"))
-            powerup_cells[(pr, pc)] = (ch, style)
+        for powerup in g.powerups:
+            row, col = int(powerup.row), int(powerup.col)
+            ch, style = POWERUP_DISPLAY.get(powerup.kind, ("?", "bold"))
+            powerup_cells[(row, col)] = (ch, style)
 
         paddle_row = g.rows - 1
-
-        txt.append("+" + "-" * g.cols + "+\n")
-        for r in range(g.rows):
-            txt.append("|")
-            for c in range(g.cols):
-                if (r, c) in ball_cells:
-                    txt.append("o", style="bold yellow")
-                elif (r, c) in powerup_cells:
-                    ch, style = powerup_cells[(r, c)]
+        txt.append("+" + "-" * g.cols + "+\n", style="dim")
+        for row in range(g.rows):
+            txt.append("|", style="dim")
+            for col in range(g.cols):
+                if (row, col) in ball_cells:
+                    txt.append("●", style="bold yellow")
+                elif (row, col) in powerup_cells:
+                    ch, style = powerup_cells[(row, col)]
                     txt.append(ch, style=style)
-                elif r == paddle_row and c in g.paddle_cells:
-                    txt.append("=", style="bold cyan")
-                elif g.board[r][c] != 0:
-                    hp = g.board[r][c]
+                elif row == paddle_row and col in g.paddle_cells:
+                    txt.append("═", style="bold cyan")
+                elif g.board[row][col] != 0:
+                    hp = g.board[row][col]
                     ch, style = BRICK_DISPLAY.get(hp, ("■", "bold white"))
                     txt.append(ch, style=style)
                 else:
-                    txt.append(" ")
-            txt.append("|\n")
-        txt.append("+" + "-" * g.cols + "+")
+                    txt.append("·", style="dim #31425f")
+            txt.append("|\n", style="dim")
+        txt.append("+" + "-" * g.cols + "+", style="dim")
         return txt
 
     def action_move_left(self) -> None:
         self.game.move_paddle_left()
-        self.refresh_view("Running")
+        self.message = "Paddle left."
+        self.refresh_view()
 
     def action_move_right(self) -> None:
         self.game.move_paddle_right()
-        self.refresh_view("Running")
+        self.message = "Paddle right."
+        self.refresh_view()
 
     def action_toggle_pause(self) -> None:
         if self.game.game_over or self.game.won:
             return
         self.paused = not self.paused
-        self.refresh_view("Paused" if self.paused else "Running")
+        self.message = "Paused." if self.paused else "Volley resumed."
+        self.refresh_view()
 
     def action_restart(self) -> None:
-        self.game.restart()
-        self.paused = False
-        self.refresh_view("Running")
+        self._restart_round(manual=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "pause":
             self.action_toggle_pause()
         elif event.button.id == "restart":
             self.action_restart()
+
+    def _schedule_auto_restart(self) -> None:
+        self._restart_token += 1
+        token = self._restart_token
+        self._restart_countdown = 5
+        for index, seconds_left in enumerate(range(5, 0, -1)):
+            self.set_timer(
+                float(index),
+                lambda remaining=seconds_left, countdown_token=token: self._set_restart_countdown(countdown_token, remaining),
+            )
+        self.set_timer(5.0, lambda countdown_token=token: self._auto_restart(countdown_token))
+        self.refresh_view()
+
+    def _set_restart_countdown(self, token: int, seconds_left: int) -> None:
+        if token != self._restart_token:
+            return
+        self._restart_countdown = seconds_left
+        self.refresh_view()
+
+    def _auto_restart(self, token: int) -> None:
+        if token != self._restart_token:
+            return
+        self._restart_round(manual=False)
+
+    def _restart_round(self, *, manual: bool) -> None:
+        self._restart_token += 1
+        self._restart_countdown = None
+        self.session_best = max(self.session_best, self.game.score)
+        self.game.restart()
+        self.paused = False
+        self.rounds_started += 1
+        self.message = "Wall reset." if manual else "Fresh wall loaded."
+        self.refresh_view()
+
+    @staticmethod
+    def _bar(value: int, *, goal: int, width: int) -> str:
+        goal = max(goal, 1)
+        filled = min(width, max(0, round((value / goal) * width)))
+        return f"{'█' * filled}{'░' * (width - filled)}"
 
 
 def run_breakout_game(*, rows: int = 32, cols: int = 24, theme: str = "modern") -> int:

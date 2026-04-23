@@ -1,6 +1,6 @@
 # Dou Dizhu
 
-A terminal dou dizhu implementation for Linux.
+A terminal dou dizhu implementation.
 
 ## Requirements
 
@@ -11,21 +11,21 @@ A terminal dou dizhu implementation for Linux.
 ## Setup
 
 ```bash
-./run.sh sync
+uv sync
 ```
 
 ## Run
 
 ```bash
-./run.sh server --host 0.0.0.0 --port 9010
-./run.sh client --host 127.0.0.1 --port 9010 --name Alice --theme modern
+uv run python -m dou_dizhu server --host 0.0.0.0 --port 9010
+uv run python -m dou_dizhu client --host 127.0.0.1 --port 9010 --name Alice --theme modern
 ```
 
 To play with bots, start the server with `--bots 1` or `--bots 2`:
 
 ```bash
-./run.sh server --host 0.0.0.0 --port 9010 --bots 2
-./run.sh client --host 127.0.0.1 --port 9010 --name Alice --theme modern
+uv run python -m dou_dizhu server --host 0.0.0.0 --port 9010 --bots 2
+uv run python -m dou_dizhu client --host 127.0.0.1 --port 9010 --name Alice --theme modern
 ```
 
 The Textual client supports `--theme modern|stealth`, runtime switching with `t`, and selection-based hand interaction.
@@ -46,11 +46,11 @@ The Textual client supports `--theme modern|stealth`, runtime switching with `t`
 If the client disconnects but the server is still running, start the client again with the same player name. The server will automatically reconnect you to your previous seat:
 
 ```bash
-./run.sh client --host 127.0.0.1 --port 9010 --name Alice
+uv run python -m dou_dizhu client --host 127.0.0.1 --port 9010 --name Alice
 ```
 
 ## Tests
 
 ```bash
-./run.sh test
+uv run python -m unittest discover -s tests -v
 ```

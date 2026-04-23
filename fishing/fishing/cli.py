@@ -14,10 +14,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lanes",
         type=int,
-        choices=(1, 2, 3, 4),
+        choices=(1, 2),
         default=1,
         metavar="N",
-        help="Number of fishing lanes (1-4). Keys: h=lane1 j=lane2 k=lane3 l=lane4.",
+        help="Number of fishing lanes (1-2). Keys: f=lane1 j=lane2.",
     )
     return parser
 

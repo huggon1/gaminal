@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import random
 import secrets
 import socket
 import threading
@@ -74,6 +75,7 @@ class BluffServer:
         deck_factory: Callable[[], list[str]] | None = None,
         *,
         bot_count: int = 0,
+        bot_delay: float = 1.5,
     ) -> None:
         if players < 2 or players > 4:
             raise ValueError("Player count must be between 2 and 4.")
@@ -97,6 +99,9 @@ class BluffServer:
         self._last_reveal: BluffRevealResult | None = None
         self._deck_factory = deck_factory or create_shuffled_deck
         self._action_log: list[str] = []
+        self._bot_delay = bot_delay
+        self._game_scores: dict[int, int] = {}
+        self._next_game_in: int | None = None
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
@@ -136,6 +141,9 @@ class BluffServer:
                         continue
                     if event_type == "bot_action":
                         self._handle_bot_turn(payload)
+                        continue
+                    if event_type == "countdown_tick":
+                        self._handle_countdown_tick(payload)
                         continue
                     if client_id is None:
                         continue
@@ -329,7 +337,10 @@ class BluffServer:
         self._append_action_log(self._message)
         self._broadcast_reveal_result(result)
         self._broadcast_room_state()
-        self._schedule_bot_turn_if_needed()
+        if self._phase == "finished" and self._round is not None and self._round.winner_seat is not None:
+            self._finish_game(self._round.winner_seat)
+        else:
+            self._schedule_bot_turn_if_needed()
         return False
 
     def _handle_leave(self, client: _ConnectedClient) -> bool:
@@ -384,7 +395,7 @@ class BluffServer:
             if self._events is not None and not self._shutdown_event.is_set():
                 self._events.put(("bot_action", None, participant.session_token))
 
-        threading.Thread(target=lambda: (time.sleep(0.05), enqueue_bot_turn()), daemon=True).start()
+        threading.Thread(target=lambda: (time.sleep(self._bot_delay), enqueue_bot_turn()), daemon=True).start()
 
     def _handle_bot_turn(self, participant_token: Any) -> None:
         if not isinstance(participant_token, str) or self._round is None or self._phase != "in_round":
@@ -395,6 +406,7 @@ class BluffServer:
         if self._round.current_turn != participant.seat:
             return
 
+        bot_rng = random.Random()
         last_claim = self._round.last_claim
         if last_claim is not None:
             claimer_hand_count = len(self._round.hands[last_claim.seat])
@@ -403,6 +415,7 @@ class BluffServer:
                 last_claim.table_rank,
                 last_claim.claimed_count,
                 claimer_hand_count,
+                rng=bot_rng,
             )
             if should_challenge:
                 try:
@@ -415,10 +428,13 @@ class BluffServer:
                 self._append_action_log(self._message)
                 self._broadcast_reveal_result(result)
                 self._broadcast_room_state()
-                self._schedule_bot_turn_if_needed()
+                if self._phase == "finished" and self._round is not None and self._round.winner_seat is not None:
+                    self._finish_game(self._round.winner_seat)
+                else:
+                    self._schedule_bot_turn_if_needed()
                 return
         try:
-            actual_cards = choose_basic_claim(self._round.hands[participant.seat], self._round.table_rank)
+            actual_cards = choose_basic_claim(self._round.hands[participant.seat], self._round.table_rank, rng=bot_rng)
             claim = self._round.play_claim(participant.seat, actual_cards)
         except ValueError:
             return
@@ -427,7 +443,10 @@ class BluffServer:
         self._message = f"Seat {participant.seat} claims {claim.claimed_count} x {claim.table_rank}."
         self._append_action_log(self._message)
         self._broadcast_room_state()
-        self._schedule_bot_turn_if_needed()
+        if self._phase == "finished" and self._round is not None and self._round.winner_seat is not None:
+            self._finish_game(self._round.winner_seat)
+        else:
+            self._schedule_bot_turn_if_needed()
 
     def _participant_for_client(self, client: _ConnectedClient) -> _Participant | None:
         if client.participant_token is None:
@@ -515,6 +534,9 @@ class BluffServer:
             "your_name": participant.name,
             "action_log": list(self._action_log),
             "seats": seats,
+            "game_scores": dict(self._game_scores),
+            "next_game_in": self._next_game_in,
+            "max_lives": self.lives,
             **round_snapshot,
         }
 
@@ -582,6 +604,35 @@ class BluffServer:
             f"Seat {result.challenged_seat} revealed {cards} and was {truth_text}. "
             f"Seat {result.loser_seat} loses 1 life.{suffix}"
         )
+
+    def _finish_game(self, winner_seat: int) -> None:
+        self._game_scores[winner_seat] = self._game_scores.get(winner_seat, 0) + 1
+        self._next_game_in = 8
+        winner = self._participant_by_seat(winner_seat)
+        name = winner.name if winner else f"Seat {winner_seat}"
+        self._message = f"{name} wins! New game in {self._next_game_in}s."
+        self._broadcast_room_state()
+        self._schedule_countdown(self._next_game_in)
+
+    def _schedule_countdown(self, remaining: int) -> None:
+        def enqueue() -> None:
+            if self._events is not None and not self._shutdown_event.is_set():
+                self._events.put(("countdown_tick", None, remaining - 1))
+
+        threading.Thread(target=lambda: (time.sleep(1.0), enqueue()), daemon=True).start()
+
+    def _handle_countdown_tick(self, remaining: int) -> None:
+        if self._phase != "finished":
+            return
+        self._next_game_in = remaining
+        if remaining <= 0:
+            self._next_game_in = None
+            self._last_reveal = None
+            self._start_round()
+        else:
+            self._message = f"New game in {remaining}s..."
+            self._broadcast_room_state()
+            self._schedule_countdown(remaining)
 
     def _send_error(self, client: _ConnectedClient, message: str) -> None:
         try:

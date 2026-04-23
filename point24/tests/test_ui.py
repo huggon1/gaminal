@@ -54,6 +54,18 @@ class Point24UiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.return_value, 0)
             self.assertFalse(app.is_running)
 
+    def test_render_summary_includes_session_progress(self) -> None:
+        app = Point24App(repository=_FakeRepository())
+        app.session_streak = 2
+        app.best_streak = 3
+        app.session_skips = 1
+
+        summary = app.render_summary()
+
+        self.assertIn("Streak:    2", summary)
+        self.assertIn("Best run:  3", summary)
+        self.assertIn("Skips:     1", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

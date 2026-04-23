@@ -16,7 +16,7 @@ A collection of terminal games built with Python and [Textual](https://github.co
 | [tetris](./tetris/README.md) | Single-player | Standard Tetris with SRS rotation and NES scoring |
 | [racing](./racing/README.md) | Single-player | Corridor racer: stay in the drifting gap, collect coins, gap narrows |
 | [breakout](./breakout/README.md) | Single-player | Ball-and-paddle brick breaker, 3 lives |
-| [fishing](./fishing/README.md) | Single-player | Stardew Valley-style fishing minigame |
+| [fishing](./fishing/README.md) | Single-player | Stardew Valley-style fishing minigame with optional 2-lane mode |
 
 ## Requirements
 

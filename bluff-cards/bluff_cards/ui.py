@@ -8,7 +8,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static
 
 from bluff_cards.client import BluffClientConnection
-from bluff_cards.core import card_label
+from bluff_cards.core import CARDS_PER_RANK, JOKER_COUNT, card_label, card_rank
 from ._textual_base import COMMON_CSS, ThemedApp
 
 
@@ -16,6 +16,13 @@ class BluffRemoteApp(ThemedApp):
     CSS = (
         COMMON_CSS
         + """
+        #scores-view {
+            height: auto;
+            padding: 0 0 1 0;
+            border-bottom: solid #2a3a5c;
+            margin-bottom: 1;
+        }
+
         #action-grid {
             height: auto;
             layout: vertical;
@@ -62,6 +69,7 @@ class BluffRemoteApp(ThemedApp):
             with Vertical(classes="panel primary-panel"):
                 yield Static("", id="table-view", classes="board-text")
             with Vertical(classes="panel side-panel"):
+                yield Static("", id="scores-view")
                 yield Static("", id="hand-view")
                 with Vertical(id="action-grid"):
                     with Horizontal(classes="action-row"):
@@ -107,19 +115,38 @@ class BluffRemoteApp(ThemedApp):
 
     def start_reveal_animation(self, reveal: dict[str, Any]) -> None:
         card_text = " ".join(card_label(card) for card in reveal.get("actual_cards", []))
-        truth = "TRUTH" if reveal.get("truthful") else "BLUFF"
+        truthful = reveal.get("truthful")
+        loser_seat = reveal["loser_seat"]
+        challenger = reveal["challenger_seat"]
+        challenged = reveal["challenged_seat"]
+        loser_elim = reveal.get("loser_eliminated", False)
+
+        if truthful:
+            verdict = "[bold green]✓  TRUTH![/bold green]"
+            damage = f"[red]Seat {loser_seat} (challenger) loses 1 ♥[/red]"
+        else:
+            verdict = "[bold red]✗  BLUFF![/bold red]"
+            damage = f"[red]Seat {loser_seat} (claimer) loses 1 ♥[/red]"
+        if loser_elim:
+            damage += "  [bold red]— ELIMINATED![/bold red]"
+
         stages = [
-            f"Challenge! Seat {reveal['challenger_seat']} calls seat {reveal['challenged_seat']}.",
-            "Flipping the cards...",
-            f"Revealed cards: {card_text}",
-            f"Result: {truth}. Seat {reveal['loser_seat']} loses 1 life.",
+            f"[bold yellow]⚡ CHALLENGE! ⚡[/bold yellow]\n[dim]Seat {challenger} calls out Seat {challenged}![/dim]",
+            "[yellow]Flipping cards...[/yellow]",
+            f"Revealed: [bold]{card_text}[/bold]",
+            f"{verdict}\n{damage}",
         ]
         self.reveal_stage_text = stages[0]
         for index, stage in enumerate(stages[1:], start=1):
-            self.set_timer(0.45 * index, lambda text=stage: self._set_reveal_stage(text))
+            self.set_timer(0.55 * index, lambda text=stage: self._set_reveal_stage(text))
+        self.set_timer(0.55 * len(stages) + 1.5, lambda: self._clear_reveal_stage())
 
     def _set_reveal_stage(self, text: str) -> None:
         self.reveal_stage_text = text
+        self.refresh_view()
+
+    def _clear_reveal_stage(self) -> None:
+        self.reveal_stage_text = None
         self.refresh_view()
 
     def current_hand(self) -> list[str]:
@@ -136,6 +163,8 @@ class BluffRemoteApp(ThemedApp):
         self.cursor_index = max(0, min(len(hand) - 1, self.cursor_index))
         self.selected_indexes = {index for index in self.selected_indexes if index < len(hand)}
 
+    # ── Render helpers ───────────────────────────────────────────────────────
+
     def render_table(self) -> str:
         if self.room is None:
             return "\n".join(
@@ -146,53 +175,172 @@ class BluffRemoteApp(ThemedApp):
                     "1. This table only uses A, K, Q and Jokers.",
                     "2. Select 1-3 cards with Space and press p to claim they all match the table rank.",
                     "3. The next player may either play their own cards or press c to challenge.",
-                    "4. After a challenge, the cards are revealed and a new round is dealt.",
+                    "4. After a challenge, the cards are revealed and the loser loses 1 life.",
                 ]
             )
-        seats = []
-        for seat in self.room["seats"]:
-            status = "online" if seat.get("connected") else "offline"
-            seats.append(
-                f"S{seat['seat']} {seat.get('name') or '(empty)'} [{status}, hand={seat.get('hand_count')}, hp={seat.get('lives')}, out={seat.get('eliminated')}]"
+
+        room = self.room
+        phase = room.get("phase", "")
+        you_seat = room.get("you_seat")
+        current_turn = room.get("current_turn")
+        table_rank = room.get("table_rank", "?")
+        max_lives: int = room.get("max_lives", 3)
+        winner_seat = room.get("winner_seat")
+        next_game_in = room.get("next_game_in")
+
+        lines: list[str] = []
+
+        # ── Phase header ──────────────────────────────────────────────────
+        if phase == "in_round":
+            total_matching = CARDS_PER_RANK + JOKER_COUNT  # always 8
+            lines.append(
+                f"[bold cyan]  TABLE RANK: {table_rank}  [/bold cyan]"
+                f"[dim]  [{CARDS_PER_RANK}×{table_rank} + {JOKER_COUNT} Jokers = {total_matching} total][/dim]"
             )
-        action_log = self.room.get("action_log", [])
-        lines = [
-            f"Phase: {self.room['phase']}",
-            f"You: seat {self.room['you_seat']} {self.room['your_name']}",
-            self.render_instruction(),
-            f"Players: {self.room['players']}",
-            "Seats:",
-            *seats,
-            "",
-            f"Table rank: {self.room.get('table_rank')}",
-            f"Current turn: seat {self.room.get('current_turn')}",
-            f"Discard count: {self.room.get('discard_count')}",
-            "",
-            "Recent actions:",
-            *(f"- {entry}" for entry in action_log[-8:]),
-        ]
-        claim = self.room.get("last_claim")
+        elif phase == "finished":
+            if next_game_in is not None:
+                lines.append(
+                    f"[bold yellow]★ GAME OVER ★[/bold yellow]  "
+                    f"[dim]New game in {next_game_in}s...[/dim]"
+                )
+            else:
+                lines.append("[bold yellow]★ GAME OVER ★[/bold yellow]")
+        elif phase == "waiting_for_players":
+            lines.append("[dim]Waiting for players to join...[/dim]")
+        elif phase == "paused_reconnect":
+            lines.append("[yellow]⏸  PAUSED — waiting for reconnect[/yellow]")
+        else:
+            lines.append(f"[dim]{phase}[/dim]")
+        lines.append("")
+
+        # ── Player HP bars ────────────────────────────────────────────────
+        for seat in room.get("seats", []):
+            sn: int = seat["seat"]
+            name: str = seat.get("name") or "(empty)"
+            lives: int = seat.get("lives") if seat.get("lives") is not None else 0
+            hand_count: int = seat.get("hand_count") or 0
+            eliminated: bool = seat.get("eliminated", False)
+            connected: bool = seat.get("connected", False)
+
+            is_you = sn == you_seat
+            is_current = sn == current_turn and phase == "in_round"
+
+            hearts = "[red]♥[/red]" * lives + "[dim]♡[/dim]" * max(0, max_lives - lives)
+            turn_arrow = "[bold green]▶[/bold green] " if is_current else "  "
+            you_tag = " [bold](YOU)[/bold]" if is_you else ""
+
+            if eliminated:
+                line = (
+                    f"{turn_arrow}[strike dim]S{sn} {name}[/strike dim]"
+                    f"{you_tag}  {hearts}  [dim]ELIMINATED[/dim]"
+                )
+            elif not connected:
+                line = (
+                    f"{turn_arrow}[dim]S{sn} {name}[/dim]"
+                    f"{you_tag}  {hearts}  [dim]({hand_count}c)  [red]OFFLINE[/red][/dim]"
+                )
+            else:
+                name_part = f"[bold]{name}[/bold]" if is_you else name
+                line = (
+                    f"{turn_arrow}S{sn} {name_part}{you_tag}"
+                    f"  {hearts}  [dim]({hand_count}c)[/dim]"
+                )
+            lines.append(line)
+
+        # ── Card pool reasoning hint ──────────────────────────────────────
+        if phase == "in_round" and table_rank:
+            total_matching = CARDS_PER_RANK + JOKER_COUNT
+            your_hand = room.get("your_hand", [])
+            my_matching = sum(1 for c in your_hand if card_rank(c) in {table_rank, "JOKER"})
+            discard_matching: int = room.get("discard_matching", 0)
+            in_play = total_matching - my_matching - discard_matching
+            lines.append(
+                f"[dim]Pool: {total_matching} matching  "
+                f"You hold: {my_matching}  "
+                f"Discard: {discard_matching}  "
+                f"→ others can have at most [/dim][bold]{in_play}[/bold]"
+            )
+        lines.append("")
+
+        # ── Reveal animation ──────────────────────────────────────────────
+        if self.reveal_stage_text:
+            lines.append(self.reveal_stage_text)
+            lines.append("")
+
+        # ── Last claim ────────────────────────────────────────────────────
+        claim = room.get("last_claim")
         if isinstance(claim, dict):
-            lines.append(f"Last claim: seat {claim['seat']} says {claim['claimed_count']} x {claim['table_rank']}")
-        if self.reveal_stage_text is not None:
-            lines.extend(["", self.reveal_stage_text])
-        if self.room.get("winner_seat") is not None:
-            lines.append(f"Winner: seat {self.room['winner_seat']}")
+            clm_seat = claim["seat"]
+            cnt = claim["claimed_count"]
+            rank = claim["table_rank"]
+            clm_p = next((s for s in room.get("seats", []) if s["seat"] == clm_seat), None)
+            cname = clm_p["name"] if clm_p else f"Seat {clm_seat}"
+            if clm_seat == you_seat:
+                lines.append(f"[yellow]Your claim:[/yellow] {cnt} × {rank}")
+            else:
+                lines.append(f"[yellow]Last claim:[/yellow] {cname} says {cnt} × {rank}")
+
+        # ── Turn / game-over notice ───────────────────────────────────────
+        if phase == "in_round" and current_turn is not None:
+            if current_turn == you_seat:
+                lines.append("[bold green]→ Your turn![/bold green]")
+            else:
+                turn_p = next((s for s in room.get("seats", []) if s["seat"] == current_turn), None)
+                tname = turn_p["name"] if turn_p else f"Seat {current_turn}"
+                lines.append(f"[dim]Waiting for {tname}...[/dim]")
+        elif phase == "finished" and winner_seat is not None:
+            winner_p = next((s for s in room.get("seats", []) if s["seat"] == winner_seat), None)
+            wname = winner_p["name"] if winner_p else f"Seat {winner_seat}"
+            if winner_seat == you_seat:
+                lines.append("[bold green]★ You win this game! ★[/bold green]")
+            else:
+                lines.append(f"[bold yellow]★ {wname} wins! ★[/bold yellow]")
+
+        lines.append("")
+
+        # ── Action log ────────────────────────────────────────────────────
+        action_log = room.get("action_log", [])
+        if action_log:
+            lines.append("[dim]━━ Recent actions ━━[/dim]")
+            for entry in action_log[-6:]:
+                lines.append(f"[dim]  {entry}[/dim]")
+
+        return "\n".join(lines)
+
+    def render_scores(self) -> str:
+        if self.room is None:
+            return ""
+        game_scores: dict = self.room.get("game_scores", {})
+        seats = self.room.get("seats", [])
+        you_seat = self.room.get("you_seat")
+
+        rows: list[tuple[int, int, str]] = []
+        for seat in seats:
+            sn: int = seat["seat"]
+            name: str = seat.get("name") or f"Seat {sn}"
+            wins = game_scores.get(sn, game_scores.get(str(sn), 0))
+            rows.append((wins, sn, name))
+        rows.sort(key=lambda r: (-r[0], r[1]))
+
+        lines = ["[dim]━━ Win board ━━[/dim]"]
+        for wins, sn, name in rows:
+            stars = "★" * wins if wins > 0 else "—"
+            is_you = sn == you_seat
+            if is_you:
+                lines.append(f"[bold]{name}: {stars} ({wins})[/bold]")
+            else:
+                lines.append(f"{name}: {stars} ({wins})")
         return "\n".join(lines)
 
     def render_hand(self) -> str:
         hand = self.current_hand()
         if not hand:
             return "Your hand:\n  (empty)"
-        lines = [
-            "Your hand:",
-            "  > cursor   * selected",
-            "  Select 1-3 cards. Press p to claim they all match the table rank.",
-        ]
+        lines = [f"Your hand ({len(hand)} cards):"]
         for index, card in enumerate(hand):
-            pointer = ">" if index == self.cursor_index else " "
-            chosen = "*" if index in self.selected_indexes else " "
-            lines.append(f"{pointer}{chosen} {index + 1:>2}. {card_label(card)}")
+            pointer = "[bold green]►[/bold green]" if index == self.cursor_index else " "
+            chosen = "[yellow]✓[/yellow]" if index in self.selected_indexes else " "
+            lines.append(f" {pointer}{chosen} {card_label(card)}")
         return "\n".join(lines)
 
     def render_instruction(self) -> str:
@@ -205,6 +353,8 @@ class BluffRemoteApp(ThemedApp):
         you_seat = self.room.get("you_seat")
         current_turn = self.room.get("current_turn")
         last_claim = self.room.get("last_claim")
+        next_game_in = self.room.get("next_game_in")
+
         if phase == "waiting_for_players":
             return "Next: wait for all seats to be filled."
         if phase == "paused_reconnect":
@@ -213,11 +363,13 @@ class BluffRemoteApp(ThemedApp):
             if current_turn == you_seat:
                 if isinstance(last_claim, dict) and last_claim.get("seat") != you_seat:
                     if self.current_hand():
-                        return "Next: choose one action. Press c to challenge, or select 1-3 cards and press p to continue the bluff."
-                    return "Next: you have no cards left. Press c to challenge the previous claim."
+                        return "Next: press c to challenge, or select 1-3 cards and press p to bluff."
+                    return "Next: you have no cards left. Press c to challenge."
                 return "Next: your turn. Select 1-3 cards and press p."
             return f"Next: wait for seat {current_turn} to act."
         if phase == "finished":
+            if next_game_in is not None:
+                return f"Next: new game starts in {next_game_in}s. Hang tight!"
             return "Next: game over. Press q to quit."
         if phase == "closed":
             return "Next: room closed. Press q to quit."
@@ -226,7 +378,10 @@ class BluffRemoteApp(ThemedApp):
     def refresh_view(self) -> None:
         self.query_one("#table-view", Static).update(self.render_table())
         self.query_one("#hand-view", Static).update(self.render_hand())
+        self.query_one("#scores-view", Static).update(self.render_scores())
         self.update_status(self.message)
+
+    # ── Input actions ────────────────────────────────────────────────────────
 
     def move_cursor(self, delta: int) -> None:
         hand = self.current_hand()

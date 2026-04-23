@@ -130,6 +130,7 @@ def _bot_friendly_deck() -> list[str]:
 class DdzServerIntegrationTests(unittest.TestCase):
     def test_full_round_can_finish_after_bidding(self) -> None:
         server, thread = self._start_server()
+        server.AUTO_NEXT_ROUND_DELAY = 0.05
         clients = [self._connect(server.port) for _ in range(3)]
         try:
             welcomes = [self._join(client, name) for client, name in zip(clients, ("Alice", "Bob", "Cara"))]
@@ -152,6 +153,12 @@ class DdzServerIntegrationTests(unittest.TestCase):
             for state in finished_states:
                 self.assertEqual(state["winner_seat"], 1)
                 self.assertEqual(state["winner_side"], "landlord")
+                self.assertEqual(state["session"]["points"], {"1": 6, "2": -3, "3": -3})
+                self.assertEqual(state["session"]["wins"], {"1": 1, "2": 0, "3": 0})
+
+            next_round = self._recv_until_phase(clients[0], "bidding")
+            self.assertEqual(next_round["session"]["round_number"], 2)
+            self.assertIn("Round 2 started", next_round["message"])
         finally:
             self._cleanup(server, thread, *clients)
 
@@ -199,8 +206,8 @@ class DdzServerIntegrationTests(unittest.TestCase):
             first_welcome = self._join(alice, "Alice")
 
             send_message(replacement["writer"], {"type": "join", "name": "Alice"})
-            replacement_notice = self._recv(alice)
-            replacement_welcome = self._recv(replacement)
+            replacement_notice = self._recv_until_type(alice, "disconnect")
+            replacement_welcome = self._recv_until_type(replacement, "welcome")
 
             self.assertEqual(replacement_notice["type"], "disconnect")
             self.assertIn("replaced by a new connection", replacement_notice["message"])
@@ -252,6 +259,8 @@ class DdzServerIntegrationTests(unittest.TestCase):
 
         self.assertIn("action_log", snapshot)
         self.assertIn("Seat 1 bid 0.", snapshot["action_log"])
+        self.assertIn("session", snapshot)
+        self.assertEqual(snapshot["session"]["round_number"], 1)
 
     def _start_server(
         self,
@@ -296,6 +305,12 @@ class DdzServerIntegrationTests(unittest.TestCase):
             payload = self._recv(client)
             if payload["type"] == "room_state" and text in str(payload["room"].get("message", "")):
                 return payload["room"]
+
+    def _recv_until_type(self, client: dict[str, object], message_type: str) -> dict[str, object]:
+        while True:
+            payload = self._recv(client)
+            if payload["type"] == message_type:
+                return payload
 
     def _close_client(self, client: dict[str, object] | None) -> None:
         if client is None:

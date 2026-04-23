@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from reversi.net.server import ReversiServer
 
@@ -33,17 +34,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "local":
         from reversi.ui.curses_app import run_local_game
 
-        return run_local_game(theme=args.theme)
+        try:
+            return run_local_game(theme=args.theme)
+        except KeyboardInterrupt:
+            print("Reversi local game interrupted.", file=sys.stderr, flush=True)
+            return 130
 
     if args.command == "server":
         server = ReversiServer(args.host, args.port)
-        server.serve_game()
+        try:
+            server.serve_game()
+        except KeyboardInterrupt:
+            server.shutdown()
+            print("Reversi server interrupted.", file=sys.stderr, flush=True)
+            return 130
         return 0
 
     if args.command == "client":
         from reversi.ui.curses_app import run_remote_client
 
-        return run_remote_client(args.host, args.port, args.name, args.session_token, args.theme)
+        try:
+            return run_remote_client(args.host, args.port, args.name, args.session_token, args.theme)
+        except KeyboardInterrupt:
+            print("Reversi client interrupted.", file=sys.stderr, flush=True)
+            return 130
 
     parser.error(f"Unsupported command: {args.command}")
     return 2
