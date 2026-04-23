@@ -1,62 +1,44 @@
-# Games Workspace
+# Gaminal — Terminal Games Workspace
 
-This repository now holds independent game projects at the root.
+A collection of terminal games built with Python and [Textual](https://github.com/Textualize/textual). Each game lives in its own directory with an independent `uv` environment.
 
-## Projects
+## Games
 
-- [gomoku](./gomoku/README.md)
-- [dou-dizhu](./dou-dizhu/README.md)
-- [bluff-cards](./bluff-cards/README.md)
-- [minesweeper](./minesweeper/README.md)
-- [point24](./point24/README.md)
-- [game-2048](./game-2048/README.md)
-- [snake](./snake/README.md)
+| Game | Type | Description |
+|------|------|-------------|
+| [gomoku](./gomoku/README.md) | Multiplayer | Classic five-in-a-row, local or networked |
+| [dou-dizhu](./dou-dizhu/README.md) | Multiplayer | Chinese landlord card game, 3-player networked |
+| [bluff-cards](./bluff-cards/README.md) | Multiplayer | Bluffing card game for 2–6 players, networked |
+| [minesweeper](./minesweeper/README.md) | Single-player | Classic minesweeper with customizable grid and difficulty |
+| [point24](./point24/README.md) | Single-player | 24-point arithmetic puzzle with precomputed puzzle set |
+| [game-2048](./game-2048/README.md) | Single-player | Slide-and-merge tile puzzle |
+| [snake](./snake/README.md) | Single-player | Classic snake, endless survival |
+| [tetris](./tetris/README.md) | Single-player | Standard Tetris with SRS rotation and NES scoring |
+| [racing](./racing/README.md) | Single-player | Corridor racer: stay in the drifting gap, collect coins, gap narrows |
+| [breakout](./breakout/README.md) | Single-player | Ball-and-paddle brick breaker, 3 lives |
+| [fishing](./fishing/README.md) | Single-player | Stardew Valley-style fishing minigame |
 
-## Usage
+## Requirements
 
-Enter the game directory you want, then use its own `uv` environment and README.
+- [`uv`](https://github.com/astral-sh/uv)
+- Python 3.12+
+- A terminal with Textual support (most modern terminals)
 
-```bash
-cd gomoku
-uv sync
-uv run python -m gomoku local --theme modern
-```
+## Getting Started
 
-```bash
-cd dou-dizhu
-uv sync
-uv run python -m dou_dizhu server --host 0.0.0.0 --port 9010
-uv run python -m dou_dizhu client --host 127.0.0.1 --port 9010 --name Alice --theme stealth
-```
-
-```bash
-cd bluff-cards
-uv sync
-uv run python -m bluff_cards server --host 0.0.0.0 --port 9020 --players 4
-uv run python -m bluff_cards client --host 127.0.0.1 --port 9020 --name Alice --theme modern
-```
+Each game is self-contained. Enter its directory, install dependencies, and run:
 
 ```bash
-cd minesweeper
+cd <game>
 uv sync
-uv run python -m minesweeper --difficulty expert --theme stealth
+uv run python -m <module> --theme modern
 ```
 
-```bash
-cd point24
-uv sync
-uv run python -m point24 --theme modern
-```
+See each game's README for the exact command, available options, and controls.
 
+## Themes
 
-```bash
-cd game-2048
-uv sync
-uv run python -m game_2048 --theme modern
-```
+All games support two visual themes selectable at launch or toggled in-game with `t`:
 
-```bash
-cd snake
-uv sync
-uv run python -m snake --theme stealth
-```
+- `modern` — blue-toned dark UI
+- `stealth` — monochrome black and white
