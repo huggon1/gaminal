@@ -5,10 +5,20 @@ import queue
 import secrets
 import socket
 import threading
+import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, TextIO
 
-from bluff_cards.core import DEFAULT_LIVES, BluffRevealResult, BluffRoundState, create_shuffled_deck
+from bluff_cards.core import (
+    DEFAULT_LIVES,
+    BluffRevealResult,
+    BluffRoundState,
+    card_label,
+    choose_basic_claim,
+    create_shuffled_deck,
+    should_basic_challenge,
+)
 from bluff_cards.protocol import send_message
 
 
@@ -47,10 +57,11 @@ class _Participant:
     name: str
     session_token: str
     connected_client_id: str | None = None
+    is_bot: bool = False
 
     @property
     def connected(self) -> bool:
-        return self.connected_client_id is not None
+        return self.is_bot or self.connected_client_id is not None
 
 
 class BluffServer:
@@ -61,12 +72,17 @@ class BluffServer:
         players: int = 4,
         lives: int = DEFAULT_LIVES,
         deck_factory: Callable[[], list[str]] | None = None,
+        *,
+        bot_count: int = 0,
     ) -> None:
         if players < 2 or players > 4:
             raise ValueError("Player count must be between 2 and 4.")
+        if bot_count < 0 or bot_count >= players:
+            raise ValueError("Bot count must be between 0 and players - 1.")
         self.host = host
         self.port = port
         self.player_capacity = players
+        self.bot_count = bot_count
         self.lives = lives
         self.ready_event = threading.Event()
         self._shutdown_event = threading.Event()
@@ -80,6 +96,7 @@ class BluffServer:
         self._resume_phase: str | None = None
         self._last_reveal: BluffRevealResult | None = None
         self._deck_factory = deck_factory or create_shuffled_deck
+        self._action_log: list[str] = []
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
@@ -101,34 +118,46 @@ class BluffServer:
             listener.bind((self.host, self.port))
             self.port = listener.getsockname()[1]
             listener.listen()
+            print(
+                f"Bluff Cards server listening on {self.host}:{self.port} with {self.bot_count} bot(s).",
+                flush=True,
+            )
             self.ready_event.set()
             threading.Thread(target=self._accept_loop, args=(listener, events), daemon=True).start()
 
             while not self._shutdown_event.is_set():
                 event_type, client_id, payload = events.get()
-
-                if event_type == "shutdown":
-                    self._close_room("Server shutting down.")
+                try:
+                    if event_type == "shutdown":
+                        self._close_room("Server shutting down.")
+                        break
+                    if event_type == "incoming":
+                        self._register_connection(payload)
+                        continue
+                    if event_type == "bot_action":
+                        self._handle_bot_turn(payload)
+                        continue
+                    if client_id is None:
+                        continue
+                    if event_type == "disconnect":
+                        self._handle_disconnect(client_id)
+                        if self._phase == "closed":
+                            break
+                        continue
+                    if event_type == "invalid_json":
+                        client = self._connections.get(client_id)
+                        if client is not None:
+                            self._send_error(client, "Invalid JSON message.")
+                        continue
+                    if event_type == "message":
+                        should_stop = self._handle_message(client_id, payload)
+                        if should_stop:
+                            break
+                except Exception as exc:
+                    print("Bluff Cards server crashed while handling an event:", flush=True)
+                    traceback.print_exc()
+                    self._close_room(f"Server error: {exc}")
                     break
-                if event_type == "incoming":
-                    self._register_connection(payload)
-                    continue
-                if client_id is None:
-                    continue
-                if event_type == "disconnect":
-                    self._handle_disconnect(client_id)
-                    if self._phase == "closed":
-                        break
-                    continue
-                if event_type == "invalid_json":
-                    client = self._connections.get(client_id)
-                    if client is not None:
-                        self._send_error(client, "Invalid JSON message.")
-                    continue
-                if event_type == "message":
-                    should_stop = self._handle_message(client_id, payload)
-                    if should_stop:
-                        break
         finally:
             self._shutdown_event.set()
             for client in list(self._connections.values()):
@@ -197,8 +226,6 @@ class BluffServer:
             return self._handle_play_claim(client, payload)
         if message_type == "challenge":
             return self._handle_challenge(client)
-        if message_type == "accept":
-            return self._handle_accept(client)
         if message_type == "leave":
             return self._handle_leave(client)
 
@@ -210,18 +237,19 @@ class BluffServer:
             self._send_error(client, "First message must be a join request.")
             return False
         name = payload.get("name")
-        session_token = payload.get("session_token")
         if not isinstance(name, str) or not name.strip():
             self._send_error(client, "Join request must include a non-empty name.")
             return False
+        normalized_name = name.strip()
+        participant = self._participant_by_name(normalized_name)
 
-        if session_token is None:
-            if len(self._participants) >= self.player_capacity:
+        if participant is None:
+            if self._human_count() >= self.player_capacity - self.bot_count:
                 self._send_error(client, "Room is full.")
                 return False
             participant = _Participant(
-                seat=len(self._participants) + 1,
-                name=name.strip(),
+                seat=self._next_open_seat(),
+                name=normalized_name,
                 session_token=secrets.token_urlsafe(16),
                 connected_client_id=client.client_id,
             )
@@ -229,23 +257,18 @@ class BluffServer:
             client.participant_token = participant.session_token
             self._message = f"{participant.name} joined seat {participant.seat}."
         else:
-            if not isinstance(session_token, str):
-                self._send_error(client, "Session token must be a string.")
-                return False
-            participant = self._participants.get(session_token)
-            if participant is None:
-                self._send_error(client, "Unknown session token.")
-                return False
             if participant.connected:
-                self._send_error(client, "That player is already connected.")
-                return False
-            participant.connected_client_id = client.client_id
-            client.participant_token = session_token
-            self._message = f"{participant.name} reconnected."
+                self._replace_existing_connection(participant, client)
+                self._message = f"{participant.name} reconnected from a new client."
+            else:
+                participant.connected_client_id = client.client_id
+                client.participant_token = participant.session_token
+                self._message = f"{participant.name} reconnected."
             if self._phase == "paused_reconnect" and self._all_connected():
                 self._phase = self._resume_phase or self._phase_before_round()
                 self._message = f"{participant.name} reconnected. Round resumed."
 
+        self._ensure_bot_participants()
         self._send_welcome(client)
         self._send_room_state(participant)
         self._broadcast_room_state(exclude_token=participant.session_token)
@@ -257,8 +280,10 @@ class BluffServer:
     def _start_round(self) -> None:
         self._round = BluffRoundState.from_deck(self._deck_factory(), self.player_capacity, self.lives)
         self._phase = "in_round"
-        self._message = f"All players connected. Target is {self._round.target_rank}. Seat 1 starts."
+        self._message = f"All players connected. Table rank is {self._round.table_rank}. Seat 1 starts."
+        self._action_log = [f"Round started. Table rank is {self._round.table_rank}. Seat 1 starts."]
         self._broadcast_room_state()
+        self._schedule_bot_turn_if_needed()
 
     def _handle_play_claim(self, client: _ConnectedClient, payload: dict[str, Any]) -> bool:
         participant = self._require_participant(client)
@@ -268,23 +293,21 @@ class BluffServer:
             self._send_error(client, "Round has not started.")
             return False
         actual_cards = payload.get("actual_cards")
-        claimed_count = payload.get("claimed_count")
         if not isinstance(actual_cards, list) or not all(isinstance(card, str) for card in actual_cards):
             self._send_error(client, "Play must include a list of actual cards.")
             return False
-        if not isinstance(claimed_count, int):
-            self._send_error(client, "Claimed count must be an integer.")
-            return False
         try:
-            claim = self._round.play_claim(participant.seat, list(actual_cards), claimed_count)
+            claim = self._round.play_claim(participant.seat, list(actual_cards))
         except ValueError as exc:
             self._send_error(client, str(exc))
             return False
 
         self._phase = self._round.phase
         self._last_reveal = None
-        self._message = f"Seat {participant.seat} claims {claim.claimed_count} x {claim.target_rank}."
+        self._message = f"Seat {participant.seat} claims {claim.claimed_count} x {claim.table_rank}."
+        self._append_action_log(self._message)
         self._broadcast_room_state()
+        self._schedule_bot_turn_if_needed()
         return False
 
     def _handle_challenge(self, client: _ConnectedClient) -> bool:
@@ -303,27 +326,10 @@ class BluffServer:
         self._last_reveal = result
         self._phase = self._round.phase
         self._message = self._challenge_message(result)
+        self._append_action_log(self._message)
         self._broadcast_reveal_result(result)
         self._broadcast_room_state()
-        return False
-
-    def _handle_accept(self, client: _ConnectedClient) -> bool:
-        participant = self._require_participant(client)
-        if participant is None:
-            return False
-        if self._round is None:
-            self._send_error(client, "Round has not started.")
-            return False
-        try:
-            winner = self._round.accept(participant.seat)
-        except ValueError as exc:
-            self._send_error(client, str(exc))
-            return False
-
-        self._phase = self._round.phase
-        self._last_reveal = None
-        self._message = f"Seat {participant.seat} accepted the empty-hand claim. Seat {winner} wins."
-        self._broadcast_room_state()
+        self._schedule_bot_turn_if_needed()
         return False
 
     def _handle_leave(self, client: _ConnectedClient) -> bool:
@@ -334,19 +340,7 @@ class BluffServer:
         return True
 
     def _handle_disconnect(self, client_id: str) -> None:
-        client = self._connections.pop(client_id, None)
-        if client is None:
-            return
-        participant = self._participant_for_client(client)
-        if participant is not None:
-            participant.connected_client_id = None
-            client.participant_token = None
-            if self._phase != "closed":
-                self._resume_phase = self._phase_before_round()
-                self._phase = "paused_reconnect"
-                self._message = f"{participant.name} disconnected. Waiting for reconnect."
-                self._broadcast_room_state()
-        client.close()
+        self._disconnect_client(client_id)
 
     def _phase_before_round(self) -> str:
         if self._round is None:
@@ -355,6 +349,85 @@ class BluffServer:
 
     def _all_connected(self) -> bool:
         return len(self._participants) == self.player_capacity and all(participant.connected for participant in self._participants.values())
+
+    def _human_count(self) -> int:
+        return sum(1 for participant in self._participants.values() if not participant.is_bot)
+
+    def _next_open_seat(self) -> int:
+        occupied = {participant.seat for participant in self._participants.values()}
+        for seat in range(1, self.player_capacity + 1):
+            if seat not in occupied:
+                return seat
+        raise ValueError("No seats available.")
+
+    def _ensure_bot_participants(self) -> None:
+        if self.bot_count == 0:
+            return
+        while len(self._participants) < self.player_capacity and self._human_count() >= self.player_capacity - self.bot_count:
+            seat = self._next_open_seat()
+            participant = _Participant(
+                seat=seat,
+                name=f"Bot {seat}",
+                session_token=f"bot-seat-{seat}",
+                is_bot=True,
+            )
+            self._participants[participant.session_token] = participant
+
+    def _schedule_bot_turn_if_needed(self) -> None:
+        if self._events is None or self._round is None or self._phase != "in_round":
+            return
+        participant = self._participant_by_seat(self._round.current_turn)
+        if participant is None or not participant.is_bot:
+            return
+
+        def enqueue_bot_turn() -> None:
+            if self._events is not None and not self._shutdown_event.is_set():
+                self._events.put(("bot_action", None, participant.session_token))
+
+        threading.Thread(target=lambda: (time.sleep(0.05), enqueue_bot_turn()), daemon=True).start()
+
+    def _handle_bot_turn(self, participant_token: Any) -> None:
+        if not isinstance(participant_token, str) or self._round is None or self._phase != "in_round":
+            return
+        participant = self._participants.get(participant_token)
+        if participant is None or not participant.is_bot:
+            return
+        if self._round.current_turn != participant.seat:
+            return
+
+        last_claim = self._round.last_claim
+        if last_claim is not None:
+            claimer_hand_count = len(self._round.hands[last_claim.seat])
+            should_challenge = should_basic_challenge(
+                self._round.hands[participant.seat],
+                last_claim.table_rank,
+                last_claim.claimed_count,
+                claimer_hand_count,
+            )
+            if should_challenge:
+                try:
+                    result = self._round.challenge(participant.seat)
+                except ValueError:
+                    return
+                self._last_reveal = result
+                self._phase = self._round.phase
+                self._message = self._challenge_message(result)
+                self._append_action_log(self._message)
+                self._broadcast_reveal_result(result)
+                self._broadcast_room_state()
+                self._schedule_bot_turn_if_needed()
+                return
+        try:
+            actual_cards = choose_basic_claim(self._round.hands[participant.seat], self._round.table_rank)
+            claim = self._round.play_claim(participant.seat, actual_cards)
+        except ValueError:
+            return
+        self._phase = self._round.phase
+        self._last_reveal = None
+        self._message = f"Seat {participant.seat} claims {claim.claimed_count} x {claim.table_rank}."
+        self._append_action_log(self._message)
+        self._broadcast_room_state()
+        self._schedule_bot_turn_if_needed()
 
     def _participant_for_client(self, client: _ConnectedClient) -> _Participant | None:
         if client.participant_token is None:
@@ -373,6 +446,16 @@ class BluffServer:
                 return participant
         return None
 
+    def _participant_by_name(self, name: str) -> _Participant | None:
+        for participant in self._participants.values():
+            if participant.name == name:
+                return participant
+        return None
+
+    def _append_action_log(self, entry: str) -> None:
+        self._action_log.append(entry)
+        self._action_log = self._action_log[-12:]
+
     def _send_welcome(self, client: _ConnectedClient) -> None:
         participant = self._participant_for_client(client)
         if participant is None:
@@ -383,7 +466,6 @@ class BluffServer:
                     "type": "welcome",
                     "seat": participant.seat,
                     "name": participant.name,
-                    "session_token": participant.session_token,
                     "players": self.player_capacity,
                 }
             )
@@ -405,7 +487,8 @@ class BluffServer:
         try:
             client.send({"type": "room_state", "room": self._room_snapshot(participant)})
         except OSError:
-            pass
+            self._disconnect_client(client.client_id)
+            return
 
     def _room_snapshot(self, participant: _Participant) -> dict[str, Any]:
         seats = []
@@ -430,6 +513,7 @@ class BluffServer:
             "players": self.player_capacity,
             "you_seat": participant.seat,
             "your_name": participant.name,
+            "action_log": list(self._action_log),
             "seats": seats,
             **round_snapshot,
         }
@@ -459,11 +543,44 @@ class BluffServer:
             except OSError:
                 continue
 
+    def _replace_existing_connection(self, participant: _Participant, new_client: _ConnectedClient) -> None:
+        old_client_id = participant.connected_client_id
+        if old_client_id is not None and old_client_id in self._connections:
+            old_client = self._connections.pop(old_client_id)
+            try:
+                old_client.send({"type": "disconnect", "message": "You were replaced by a new connection using the same name."})
+            except OSError:
+                pass
+            old_client.close()
+        participant.connected_client_id = new_client.client_id
+        new_client.participant_token = participant.session_token
+
+    def _disconnect_client(self, client_id: str) -> None:
+        client = self._connections.pop(client_id, None)
+        if client is None:
+            return
+        participant = self._participant_for_client(client)
+        if participant is not None and participant.connected_client_id == client_id:
+            participant.connected_client_id = None
+            client.participant_token = None
+            if self._phase != "closed":
+                self._resume_phase = self._phase_before_round()
+                self._phase = "paused_reconnect"
+                self._message = f"{participant.name} disconnected. Waiting for reconnect."
+                self._broadcast_room_state()
+        client.close()
+
     def _challenge_message(self, result: BluffRevealResult) -> str:
         truth_text = "truthful" if result.truthful else "bluffing"
+        cards = " ".join(card_label(card) for card in result.actual_cards)
+        suffix = (
+            f" Next table rank: {result.next_table_rank}."
+            if result.next_table_rank is not None
+            else ""
+        )
         return (
-            f"Seat {result.challenged_seat} revealed {' '.join(result.actual_cards)} and was {truth_text}. "
-            f"Seat {result.loser_seat} loses 1 life."
+            f"Seat {result.challenged_seat} revealed {cards} and was {truth_text}. "
+            f"Seat {result.loser_seat} loses 1 life.{suffix}"
         )
 
     def _send_error(self, client: _ConnectedClient, message: str) -> None:

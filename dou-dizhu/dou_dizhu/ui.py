@@ -21,12 +21,17 @@ class DdzRemoteApp(ThemedApp):
 
         #action-grid {
             height: auto;
+            layout: vertical;
         }
 
-        #action-grid Button {
+        .action-row {
+            height: auto;
+        }
+
+        .action-row Button {
             margin-right: 1;
             margin-bottom: 1;
-            min-width: 9;
+            min-width: 8;
         }
         """
     )
@@ -42,15 +47,14 @@ class DdzRemoteApp(ThemedApp):
         Binding("2", "bid_two", "Bid2", show=False),
         Binding("3", "bid_three", "Bid3", show=False),
     ]
-    help_text = "Up/Down browse hand  Space select  p play  a pass  0-3 bid  Esc clear  t theme"
+    help_text = "Up/Down move  Space select card  p play  a pass  0-3 bid  Esc clear  q quit"
 
-    def __init__(self, host: str, port: int, name: str, session_token: str | None = None, *, theme: str = "modern") -> None:
+    def __init__(self, host: str, port: int, name: str, *, theme: str = "modern") -> None:
         super().__init__(theme=theme)
         self.host = host
         self.port = port
-        self.name = name
-        self.session_token = session_token
-        self.connection = DdzClientConnection(host, port, name, session_token)
+        self.player_name = name
+        self.connection = DdzClientConnection(host, port, name)
         self.room: dict[str, Any] | None = None
         self.disconnected = False
         self.cursor_index = 0
@@ -64,22 +68,29 @@ class DdzRemoteApp(ThemedApp):
                 yield Static("", id="table-view", classes="board-text")
             with Vertical(classes="panel side-panel", id="hand-panel"):
                 yield Static("", id="hand-view")
-                with Horizontal(id="action-grid"):
-                    yield Button("Play", id="play")
-                    yield Button("Pass", id="pass")
-                    yield Button("Clear", id="clear")
-                    yield Button("Bid 0", id="bid-0")
-                    yield Button("Bid 1", id="bid-1")
-                    yield Button("Bid 2", id="bid-2")
-                    yield Button("Bid 3", id="bid-3")
+                with Vertical(id="action-grid"):
+                    with Horizontal(classes="action-row"):
+                        yield Button("Play", id="play")
+                        yield Button("Pass", id="pass")
+                        yield Button("Clear", id="clear")
+                    with Horizontal(classes="action-row"):
+                        yield Button("Bid 0", id="bid-0")
+                        yield Button("Bid 1", id="bid-1")
+                        yield Button("Bid 2", id="bid-2")
+                        yield Button("Bid 3", id="bid-3")
         yield Static("", id="help-panel")
         yield Static("", id="status-bar")
 
     def on_mount(self) -> None:
         super().on_mount()
-        self.connection.connect()
+        try:
+            self.connection.connect()
+        except OSError as exc:
+            self.disconnected = True
+            self.message = f"Failed to connect to {self.host}:{self.port}: {exc}"
+        else:
+            self.message = f"Connected to {self.host}:{self.port}. Joining room..."
         self.set_interval(0.1, self.poll_messages)
-        self.message = f"Connected to {self.host}:{self.port}. Joining room..."
         self.refresh_view()
 
     def on_unmount(self) -> None:
@@ -89,7 +100,6 @@ class DdzRemoteApp(ThemedApp):
         for payload in self.connection.poll_messages():
             payload_type = payload.get("type")
             if payload_type == "welcome":
-                self.session_token = str(payload["session_token"])
                 self.message = f"Joined seat {payload['seat']} as {payload['name']}."
             elif payload_type == "room_state":
                 self.room = dict(payload["room"])
@@ -101,8 +111,6 @@ class DdzRemoteApp(ThemedApp):
                 self.disconnected = True
                 self.message = str(payload.get("message", "Connection closed."))
         self.refresh_view()
-        if self.disconnected:
-            self.exit(0)
 
     def trim_selection(self) -> None:
         hand = self.current_hand()
@@ -120,7 +128,17 @@ class DdzRemoteApp(ThemedApp):
 
     def render_table(self) -> str:
         if self.room is None:
-            return "Waiting for room state..."
+            return "\n".join(
+                [
+                    "Waiting for room state...",
+                    "",
+                    "How to play:",
+                    "1. Wait for three seats to fill.",
+                    "2. During bidding, press 0/1/2/3.",
+                    "3. During play, select cards with Space, then press p.",
+                    "4. If you cannot beat the table, press a to pass.",
+                ]
+            )
         seats = []
         for seat in self.room["seats"]:
             role = "landlord" if seat.get("is_landlord") else "farmer"
@@ -128,9 +146,12 @@ class DdzRemoteApp(ThemedApp):
             seats.append(f"S{seat['seat']} {seat.get('name') or '(empty)'} [{role}, {status}, cards={seat.get('hand_count', '-')}]")
         table_cards = " ".join(self.room.get("table_cards", [])) or "(none)"
         bottom = " ".join(self.room.get("bottom_cards", [])) or "(hidden)"
+        hand_counts = self.room.get("hand_counts", {})
+        action_log = self.room.get("action_log", [])
         lines = [
             f"Phase: {self.room['phase']}",
             f"You: seat {self.room['you_seat']} {self.room['your_name']}",
+            self.render_instruction(),
             "Seats:",
             *seats,
             "",
@@ -139,23 +160,62 @@ class DdzRemoteApp(ThemedApp):
             f"Landlord: {self.room.get('landlord_seat')}",
             f"Bottom cards: {bottom}",
             f"Table: seat {self.room.get('table_seat')} -> {table_cards}",
+            f"Hand counts: S1={hand_counts.get(1, '-')}  S2={hand_counts.get(2, '-')}  S3={hand_counts.get(3, '-')}",
+            "",
+            "Recent actions:",
+            *(f"- {entry}" for entry in action_log[-8:]),
         ]
         if self.room.get("winner_seat") is not None:
             lines.append(f"Winner: seat {self.room['winner_seat']} ({self.room['winner_side']})")
-        if self.session_token is not None:
-            lines.append(f"Reconnect token: {self.session_token}")
         return "\n".join(lines)
 
     def render_hand(self) -> str:
         hand = self.current_hand()
         if not hand:
             return "Your hand:\n  (empty)"
-        lines = ["Your hand:"]
+        lines = [
+            "Your hand:",
+            "  > cursor   * selected",
+            "  Select cards with Space. Press p to play the selected set.",
+        ]
         for index, card in enumerate(hand):
             pointer = ">" if index == self.cursor_index else " "
             chosen = "*" if index in self.selected_indexes else " "
             lines.append(f"{pointer}{chosen} {index + 1:>2}. {card}")
         return "\n".join(lines)
+
+    def render_instruction(self) -> str:
+        if self.room is None:
+            return "Next: wait for the server to send the room state."
+
+        phase = str(self.room.get("phase"))
+        you_seat = self.room.get("you_seat")
+        current_turn = self.room.get("current_turn")
+        if self.disconnected:
+            return "Next: disconnected. Restart the client with the same name to rejoin."
+        if phase == "waiting_for_players":
+            return "Next: wait for all three seats to be filled."
+        if phase == "paused_reconnect":
+            return "Next: a player disconnected. Wait for them to rejoin with the same name."
+        if phase == "bidding":
+            if current_turn == you_seat:
+                highest_bid = self.room.get("highest_bid", 0)
+                return f"Next: your bid. Press 0/1/2/3. Current highest bid is {highest_bid}."
+            return f"Next: wait for seat {current_turn} to bid."
+        if phase == "playing":
+            if self.room.get("winner_seat") is not None:
+                return "Next: round finished. Press q to quit, or restart the room from the server."
+            if current_turn == you_seat:
+                table_seat = self.room.get("table_seat")
+                if table_seat is None:
+                    return "Next: lead this trick. Select a valid set of cards with Space, then press p."
+                return "Next: respond to the table. Select a stronger valid set, then press p. Press a to pass."
+            return f"Next: wait for seat {current_turn} to act."
+        if phase == "finished":
+            return "Next: round finished. Press q to quit."
+        if phase == "closed":
+            return "Next: room closed. Press q to quit."
+        return "Next: follow the status message below."
 
     def refresh_view(self) -> None:
         self.query_one("#table-view", Static).update(self.render_table())
@@ -176,6 +236,10 @@ class DdzRemoteApp(ThemedApp):
         self.move_cursor(1)
 
     def action_toggle_card(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         hand = self.current_hand()
         if not hand:
             self.message = "No cards available."
@@ -189,11 +253,19 @@ class DdzRemoteApp(ThemedApp):
         self.refresh_view()
 
     def action_clear_selection(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         self.selected_indexes.clear()
         self.message = "Selection cleared."
         self.refresh_view()
 
     def play_selected_cards(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         hand = self.current_hand()
         if not self.selected_indexes:
             self.message = "Select at least one card first."
@@ -214,6 +286,10 @@ class DdzRemoteApp(ThemedApp):
         self.play_selected_cards()
 
     def action_pass_turn(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         try:
             self.connection.send_pass()
         except OSError:
@@ -225,6 +301,10 @@ class DdzRemoteApp(ThemedApp):
         self.refresh_view()
 
     def send_bid(self, amount: int) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         try:
             self.connection.send_bid(amount)
         except OSError:
@@ -269,7 +349,6 @@ def run_ddz_remote_client(
     host: str,
     port: int,
     name: str,
-    session_token: str | None = None,
     theme: str = "modern",
 ) -> int:
-    return DdzRemoteApp(host, port, name, session_token, theme=theme).run() or 0
+    return DdzRemoteApp(host, port, name, theme=theme).run() or 0

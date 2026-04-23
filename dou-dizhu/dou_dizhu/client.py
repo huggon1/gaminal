@@ -10,11 +10,10 @@ from dou_dizhu.protocol import send_message
 
 
 class DdzClientConnection:
-    def __init__(self, host: str, port: int, name: str, session_token: str | None = None) -> None:
+    def __init__(self, host: str, port: int, name: str) -> None:
         self.host = host
         self.port = port
         self.name = name
-        self.session_token = session_token
         self._socket: socket.socket | None = None
         self._reader = None
         self._writer = None
@@ -24,14 +23,12 @@ class DdzClientConnection:
 
     def connect(self) -> None:
         self._socket = socket.create_connection((self.host, self.port), timeout=5)
+        self._socket.settimeout(None)
         self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._reader = self._socket.makefile("r", encoding="utf-8", newline="\n")
         self._writer = self._socket.makefile("w", encoding="utf-8", newline="\n")
         threading.Thread(target=self._reader_loop, daemon=True).start()
-        payload: dict[str, Any] = {"type": "join", "name": self.name}
-        if self.session_token is not None:
-            payload["session_token"] = self.session_token
-        self.send(payload)
+        self.send({"type": "join", "name": self.name})
 
     def _reader_loop(self) -> None:
         assert self._reader is not None

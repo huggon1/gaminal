@@ -1,7 +1,7 @@
 from .client import BluffClientConnection
 from .core import (
     DEFAULT_LIVES,
-    TARGET_SEQUENCE,
+    TABLE_RANKS,
     BluffClaim,
     BluffRoundState,
     BluffRevealResult,
@@ -17,7 +17,7 @@ __all__ = [
     "BluffRoundState",
     "BluffServer",
     "DEFAULT_LIVES",
-    "TARGET_SEQUENCE",
+    "TABLE_RANKS",
     "create_shuffled_deck",
     "is_truthful_claim",
 ]

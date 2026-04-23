@@ -13,6 +13,13 @@ class DdzCliTests(unittest.TestCase):
 
         self.assertEqual(args.command, "client")
         self.assertEqual(args.theme, "stealth")
+        self.assertFalse(hasattr(args, "session_token"))
+
+    def test_server_supports_bot_count(self) -> None:
+        args = build_parser().parse_args(["server", "--host", "127.0.0.1", "--port", "9010", "--bots", "2"])
+
+        self.assertEqual(args.command, "server")
+        self.assertEqual(args.bots, 2)
 
 
 if __name__ == "__main__":
