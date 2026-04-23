@@ -7,22 +7,28 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Static
 
-from ._textual_base import COMMON_CSS, ThemedApp
 from bluff_cards.client import BluffClientConnection
+from bluff_cards.core import card_label
+from ._textual_base import COMMON_CSS, ThemedApp
 
 
 class BluffRemoteApp(ThemedApp):
     CSS = (
         COMMON_CSS
         + """
-        #action-row {
+        #action-grid {
+            height: auto;
+            layout: vertical;
+        }
+
+        .action-row {
             height: auto;
         }
 
-        #action-row Button {
+        .action-row Button {
             margin-right: 1;
             margin-bottom: 1;
-            min-width: 10;
+            min-width: 8;
         }
         """
     )
@@ -32,27 +38,22 @@ class BluffRemoteApp(ThemedApp):
         Binding("space", "toggle_card", "Select"),
         Binding("p", "play_claim", "Play"),
         Binding("c", "challenge_claim", "Challenge"),
-        Binding("a", "accept_claim", "Accept"),
-        Binding("1", "set_claim_one", "Claim1", show=False),
-        Binding("2", "set_claim_two", "Claim2", show=False),
-        Binding("3", "set_claim_three", "Claim3", show=False),
         Binding("escape", "clear_selection", "Clear", show=False),
     ]
-    help_text = "Up/Down browse hand  Space select  1-3 claim count  p play  c challenge  a accept"
+    help_text = "Up/Down move  Space select  p play cards  c challenge  Esc clear  q quit"
 
-    def __init__(self, host: str, port: int, name: str, session_token: str | None = None, *, theme: str = "modern") -> None:
+    def __init__(self, host: str, port: int, name: str, *, theme: str = "modern") -> None:
         super().__init__(theme=theme)
         self.host = host
         self.port = port
-        self.name = name
-        self.session_token = session_token
-        self.connection = BluffClientConnection(host, port, name, session_token)
+        self.player_name = name
+        self.connection = BluffClientConnection(host, port, name)
         self.room: dict[str, Any] | None = None
         self.reveal: dict[str, Any] | None = None
+        self.reveal_stage_text: str | None = None
         self.disconnected = False
         self.cursor_index = 0
         self.selected_indexes: set[int] = set()
-        self.claim_count = 1
         self.message = f"Connecting to {host}:{port}..."
 
     def compose(self) -> ComposeResult:
@@ -62,22 +63,24 @@ class BluffRemoteApp(ThemedApp):
                 yield Static("", id="table-view", classes="board-text")
             with Vertical(classes="panel side-panel"):
                 yield Static("", id="hand-view")
-                with Horizontal(id="action-row"):
-                    yield Button("Play", id="play")
-                    yield Button("Challenge", id="challenge")
-                    yield Button("Accept", id="accept")
-                    yield Button("Clear", id="clear")
-                    yield Button("Claim 1", id="claim-1")
-                    yield Button("Claim 2", id="claim-2")
-                    yield Button("Claim 3", id="claim-3")
+                with Vertical(id="action-grid"):
+                    with Horizontal(classes="action-row"):
+                        yield Button("Play", id="play")
+                        yield Button("Challenge", id="challenge")
+                        yield Button("Clear", id="clear")
         yield Static("", id="help-panel")
         yield Static("", id="status-bar")
 
     def on_mount(self) -> None:
         super().on_mount()
-        self.connection.connect()
+        try:
+            self.connection.connect()
+        except OSError as exc:
+            self.disconnected = True
+            self.message = f"Failed to connect to {self.host}:{self.port}: {exc}"
+        else:
+            self.message = f"Connected to {self.host}:{self.port}. Joining room..."
         self.set_interval(0.1, self.poll_messages)
-        self.message = f"Connected to {self.host}:{self.port}. Joining room..."
         self.refresh_view()
 
     def on_unmount(self) -> None:
@@ -87,7 +90,6 @@ class BluffRemoteApp(ThemedApp):
         for payload in self.connection.poll_messages():
             payload_type = payload.get("type")
             if payload_type == "welcome":
-                self.session_token = str(payload["session_token"])
                 self.message = f"Joined seat {payload['seat']} as {payload['name']}."
             elif payload_type == "room_state":
                 self.room = dict(payload["room"])
@@ -95,15 +97,30 @@ class BluffRemoteApp(ThemedApp):
                 self.trim_selection()
             elif payload_type == "reveal_result":
                 self.reveal = dict(payload["result"])
-                self.message = self.reveal_message(self.reveal)
+                self.start_reveal_animation(self.reveal)
             elif payload_type == "error":
                 self.message = str(payload.get("message", "Action rejected."))
             elif payload_type == "disconnect":
                 self.disconnected = True
                 self.message = str(payload.get("message", "Connection closed."))
         self.refresh_view()
-        if self.disconnected:
-            self.exit(0)
+
+    def start_reveal_animation(self, reveal: dict[str, Any]) -> None:
+        card_text = " ".join(card_label(card) for card in reveal.get("actual_cards", []))
+        truth = "TRUTH" if reveal.get("truthful") else "BLUFF"
+        stages = [
+            f"Challenge! Seat {reveal['challenger_seat']} calls seat {reveal['challenged_seat']}.",
+            "Flipping the cards...",
+            f"Revealed cards: {card_text}",
+            f"Result: {truth}. Seat {reveal['loser_seat']} loses 1 life.",
+        ]
+        self.reveal_stage_text = stages[0]
+        for index, stage in enumerate(stages[1:], start=1):
+            self.set_timer(0.45 * index, lambda text=stage: self._set_reveal_stage(text))
+
+    def _set_reveal_stage(self, text: str) -> None:
+        self.reveal_stage_text = text
+        self.refresh_view()
 
     def current_hand(self) -> list[str]:
         if self.room is None:
@@ -121,46 +138,90 @@ class BluffRemoteApp(ThemedApp):
 
     def render_table(self) -> str:
         if self.room is None:
-            return "Waiting for room state..."
+            return "\n".join(
+                [
+                    "Waiting for room state...",
+                    "",
+                    "How to play:",
+                    "1. This table only uses A, K, Q and Jokers.",
+                    "2. Select 1-3 cards with Space and press p to claim they all match the table rank.",
+                    "3. The next player may either play their own cards or press c to challenge.",
+                    "4. After a challenge, the cards are revealed and a new round is dealt.",
+                ]
+            )
         seats = []
         for seat in self.room["seats"]:
             status = "online" if seat.get("connected") else "offline"
             seats.append(
                 f"S{seat['seat']} {seat.get('name') or '(empty)'} [{status}, hand={seat.get('hand_count')}, hp={seat.get('lives')}, out={seat.get('eliminated')}]"
             )
+        action_log = self.room.get("action_log", [])
         lines = [
             f"Phase: {self.room['phase']}",
             f"You: seat {self.room['you_seat']} {self.room['your_name']}",
+            self.render_instruction(),
             f"Players: {self.room['players']}",
             "Seats:",
             *seats,
             "",
-            f"Target rank: {self.room.get('target_rank')}",
+            f"Table rank: {self.room.get('table_rank')}",
             f"Current turn: seat {self.room.get('current_turn')}",
             f"Discard count: {self.room.get('discard_count')}",
-            f"Claim count selector: {self.claim_count}",
+            "",
+            "Recent actions:",
+            *(f"- {entry}" for entry in action_log[-8:]),
         ]
         claim = self.room.get("last_claim")
         if isinstance(claim, dict):
-            lines.append(f"Last claim: seat {claim['seat']} says {claim['claimed_count']} x {claim['target_rank']}")
-        if self.reveal is not None:
-            lines.append(self.reveal_message(self.reveal))
+            lines.append(f"Last claim: seat {claim['seat']} says {claim['claimed_count']} x {claim['table_rank']}")
+        if self.reveal_stage_text is not None:
+            lines.extend(["", self.reveal_stage_text])
         if self.room.get("winner_seat") is not None:
             lines.append(f"Winner: seat {self.room['winner_seat']}")
-        if self.session_token is not None:
-            lines.append(f"Reconnect token: {self.session_token}")
         return "\n".join(lines)
 
     def render_hand(self) -> str:
         hand = self.current_hand()
         if not hand:
             return "Your hand:\n  (empty)"
-        lines = ["Your hand:"]
+        lines = [
+            "Your hand:",
+            "  > cursor   * selected",
+            "  Select 1-3 cards. Press p to claim they all match the table rank.",
+        ]
         for index, card in enumerate(hand):
             pointer = ">" if index == self.cursor_index else " "
             chosen = "*" if index in self.selected_indexes else " "
-            lines.append(f"{pointer}{chosen} {index + 1:>2}. {card}")
+            lines.append(f"{pointer}{chosen} {index + 1:>2}. {card_label(card)}")
         return "\n".join(lines)
+
+    def render_instruction(self) -> str:
+        if self.room is None:
+            return "Next: wait for the server to send the room state."
+        if self.disconnected:
+            return "Next: disconnected. Restart the client with the same name to rejoin."
+
+        phase = str(self.room.get("phase"))
+        you_seat = self.room.get("you_seat")
+        current_turn = self.room.get("current_turn")
+        last_claim = self.room.get("last_claim")
+        if phase == "waiting_for_players":
+            return "Next: wait for all seats to be filled."
+        if phase == "paused_reconnect":
+            return "Next: a player disconnected. Wait for them to rejoin with the same name."
+        if phase == "in_round":
+            if current_turn == you_seat:
+                if isinstance(last_claim, dict) and last_claim.get("seat") != you_seat:
+                    if self.current_hand():
+                        return "Next: choose one action. Press c to challenge, or select 1-3 cards and press p to continue the bluff."
+                    return "Next: you have no cards left. Press c to challenge the previous claim."
+                return "Next: your turn. Select 1-3 cards and press p."
+            return f"Next: wait for seat {current_turn} to act."
+        if phase == "finished":
+            return "Next: game over. Press q to quit."
+        if phase == "closed":
+            return "Next: room closed. Press q to quit."
+        return "Next: follow the status message below."
 
     def refresh_view(self) -> None:
         self.query_one("#table-view", Static).update(self.render_table())
@@ -181,6 +242,10 @@ class BluffRemoteApp(ThemedApp):
         self.move_cursor(1)
 
     def action_toggle_card(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         hand = self.current_hand()
         if not hand:
             self.message = "No cards available."
@@ -194,25 +259,19 @@ class BluffRemoteApp(ThemedApp):
         self.refresh_view()
 
     def action_clear_selection(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         self.selected_indexes.clear()
         self.message = "Selection cleared."
         self.refresh_view()
 
-    def set_claim_count(self, count: int) -> None:
-        self.claim_count = count
-        self.message = f"Claim count set to {count}."
-        self.refresh_view()
-
-    def action_set_claim_one(self) -> None:
-        self.set_claim_count(1)
-
-    def action_set_claim_two(self) -> None:
-        self.set_claim_count(2)
-
-    def action_set_claim_three(self) -> None:
-        self.set_claim_count(3)
-
     def action_play_claim(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         hand = self.current_hand()
         if not self.selected_indexes:
             self.message = "Select at least one card first."
@@ -220,16 +279,20 @@ class BluffRemoteApp(ThemedApp):
             return
         cards = [hand[index] for index in sorted(self.selected_indexes)]
         try:
-            self.connection.send_play_claim(cards, self.claim_count)
+            self.connection.send_play_claim(cards)
         except OSError:
             self.disconnected = True
             self.message = "Connection closed while sending play."
         else:
-            self.message = f"Claimed {self.claim_count} card(s)."
+            self.message = f"Played {len(cards)} face-down card(s)."
             self.selected_indexes.clear()
         self.refresh_view()
 
     def action_challenge_claim(self) -> None:
+        if self.disconnected:
+            self.message = "Disconnected. Press q to quit."
+            self.refresh_view()
+            return
         try:
             self.connection.send_challenge()
         except OSError:
@@ -238,21 +301,6 @@ class BluffRemoteApp(ThemedApp):
         else:
             self.message = "Challenge sent."
         self.refresh_view()
-
-    def action_accept_claim(self) -> None:
-        try:
-            self.connection.send_accept()
-        except OSError:
-            self.disconnected = True
-            self.message = "Connection closed while sending accept."
-        else:
-            self.message = "Accept sent."
-        self.refresh_view()
-
-    def reveal_message(self, reveal: dict[str, Any]) -> str:
-        truth = "truthful" if reveal.get("truthful") else "bluffing"
-        cards = " ".join(reveal.get("actual_cards", []))
-        return f"Reveal: seat {reveal['challenged_seat']} showed {cards} and was {truth}. Seat {reveal['loser_seat']} lost 1 life."
 
     def action_quit_app(self) -> None:
         try:
@@ -267,19 +315,14 @@ class BluffRemoteApp(ThemedApp):
             self.action_play_claim()
         elif button_id == "challenge":
             self.action_challenge_claim()
-        elif button_id == "accept":
-            self.action_accept_claim()
         elif button_id == "clear":
             self.action_clear_selection()
-        elif button_id and button_id.startswith("claim-"):
-            self.set_claim_count(int(button_id.rsplit("-", 1)[1]))
 
 
 def run_bluff_remote_client(
     host: str,
     port: int,
     name: str,
-    session_token: str | None = None,
     theme: str = "modern",
 ) -> int:
-    return BluffRemoteApp(host, port, name, session_token, theme=theme).run() or 0
+    return BluffRemoteApp(host, port, name, theme=theme).run() or 0

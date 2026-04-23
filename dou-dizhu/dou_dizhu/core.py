@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from collections import Counter
 from dataclasses import dataclass, field
+from itertools import combinations
 
 RANK_ORDER = {
     "3": 3,
@@ -65,6 +66,14 @@ class CardPattern:
     primary_value: int
     length: int
     chain_length: int = 1
+
+
+@dataclass(frozen=True)
+class PlayContext:
+    seat: int
+    landlord_seat: int | None
+    last_play_seat: int | None
+    hand_counts: dict[int, int]
 
 
 def analyze_play(cards: list[str]) -> CardPattern:
@@ -151,6 +160,302 @@ def compare_patterns(current: CardPattern, previous: CardPattern | None) -> bool
     if current.chain_length != previous.chain_length:
         return False
     return current.primary_value > previous.primary_value
+
+
+def _cards_by_rank(hand: list[str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for card in sort_cards(list(hand)):
+        grouped.setdefault(card_rank(card), []).append(card)
+    return grouped
+
+
+def _candidate_priority(cards: list[str], previous: CardPattern | None) -> tuple[int, int, int, int]:
+    pattern = analyze_play(cards)
+    bomb_penalty = 1 if pattern.kind in {"bomb", "rocket"} else 0
+    if previous is None:
+        lead_kind_rank = {
+            "airplane_pair": 0,
+            "airplane_single": 1,
+            "airplane": 2,
+            "pair_straight": 3,
+            "straight": 4,
+            "triple_pair": 5,
+            "triple_single": 6,
+            "triple": 7,
+            "pair": 8,
+            "single": 9,
+            "four_two_pair": 10,
+            "four_two_single": 11,
+            "bomb": 12,
+            "rocket": 13,
+        }
+        return (
+            bomb_penalty,
+            lead_kind_rank.get(pattern.kind, 99),
+            -pattern.length,
+            pattern.primary_value,
+        )
+    return (bomb_penalty, pattern.primary_value, pattern.length, pattern.chain_length)
+
+
+def generate_legal_plays(hand: list[str], previous: CardPattern | None = None) -> list[list[str]]:
+    if not hand:
+        return []
+
+    by_rank = _cards_by_rank(hand)
+    ranks = _sorted_ranks(Counter(card_rank(card) for card in hand))
+    candidates: dict[tuple[str, ...], list[str]] = {}
+
+    def add(cards: list[str]) -> None:
+        normalized = sort_cards(list(cards))
+        try:
+            pattern = analyze_play(normalized)
+        except ValueError:
+            return
+        if compare_patterns(pattern, previous):
+            candidates[tuple(normalized)] = normalized
+
+    for rank in ranks:
+        cards = by_rank[rank]
+        add(cards[:1])
+        if len(cards) >= 2:
+            add(cards[:2])
+        if len(cards) >= 3:
+            add(cards[:3])
+        if len(cards) == 4:
+            add(cards[:4])
+
+    if "BJ" in by_rank and "RJ" in by_rank:
+        add(["BJ", "RJ"])
+
+    playable_sequence_ranks = [rank for rank in ranks if RANK_ORDER[rank] <= SEQUENCE_MAX_VALUE]
+    for start in range(len(playable_sequence_ranks)):
+        for end in range(start + 5, len(playable_sequence_ranks) + 1):
+            chain = playable_sequence_ranks[start:end]
+            values = [RANK_ORDER[rank] for rank in chain]
+            if not _is_consecutive(values):
+                break
+            add([by_rank[rank][0] for rank in chain])
+
+    pair_ranks = [rank for rank in playable_sequence_ranks if len(by_rank[rank]) >= 2]
+    for start in range(len(pair_ranks)):
+        for end in range(start + 3, len(pair_ranks) + 1):
+            chain = pair_ranks[start:end]
+            values = [RANK_ORDER[rank] for rank in chain]
+            if not _is_consecutive(values):
+                break
+            cards: list[str] = []
+            for rank in chain:
+                cards.extend(by_rank[rank][:2])
+            add(cards)
+
+    triple_ranks = [rank for rank in playable_sequence_ranks if len(by_rank[rank]) >= 3]
+    for rank in triple_ranks:
+        base = by_rank[rank][:3]
+        add(base)
+        for single_rank in ranks:
+            if single_rank == rank:
+                continue
+            add(base + by_rank[single_rank][:1])
+        for pair_rank in ranks:
+            if pair_rank == rank or len(by_rank[pair_rank]) < 2:
+                continue
+            add(base + by_rank[pair_rank][:2])
+
+    for start in range(len(triple_ranks)):
+        for end in range(start + 2, len(triple_ranks) + 1):
+            chain = triple_ranks[start:end]
+            values = [RANK_ORDER[rank] for rank in chain]
+            if not _is_consecutive(values):
+                break
+            chain_cards: list[str] = []
+            for rank in chain:
+                chain_cards.extend(by_rank[rank][:3])
+            add(chain_cards)
+
+            chain_set = set(chain)
+            attachment_ranks = [rank for rank in ranks if rank not in chain_set]
+            for single_combo in combinations(attachment_ranks, len(chain)):
+                cards = list(chain_cards)
+                for rank in single_combo:
+                    cards.extend(by_rank[rank][:1])
+                add(cards)
+            pair_attachment_ranks = [rank for rank in attachment_ranks if len(by_rank[rank]) >= 2]
+            for pair_combo in combinations(pair_attachment_ranks, len(chain)):
+                cards = list(chain_cards)
+                for rank in pair_combo:
+                    cards.extend(by_rank[rank][:2])
+                add(cards)
+
+    for rank in ranks:
+        if len(by_rank[rank]) != 4:
+            continue
+        quad = by_rank[rank][:4]
+        remaining_ranks = [other for other in ranks if other != rank]
+        for single_combo in combinations(remaining_ranks, 2):
+            cards = list(quad)
+            for single_rank in single_combo:
+                cards.extend(by_rank[single_rank][:1])
+            add(cards)
+        pair_ranks_for_quad = [other for other in remaining_ranks if len(by_rank[other]) >= 2]
+        for pair_combo in combinations(pair_ranks_for_quad, 2):
+            cards = list(quad)
+            for pair_rank in pair_combo:
+                cards.extend(by_rank[pair_rank][:2])
+            add(cards)
+
+    return sorted(candidates.values(), key=lambda cards: _candidate_priority(cards, previous))
+
+
+def _hand_group_count(hand: list[str]) -> int:
+    return len(generate_legal_plays(hand, None)[:1]) if not hand else len(_cards_by_rank(hand))
+
+
+def _is_teammate(context: PlayContext, other_seat: int | None) -> bool:
+    if other_seat is None or context.landlord_seat is None:
+        return False
+    return (context.seat == context.landlord_seat) == (other_seat == context.landlord_seat)
+
+
+def _remaining_hand_score(hand: list[str]) -> tuple[int, int, int]:
+    counts = Counter(card_rank(card) for card in hand)
+    group_count = len(counts)
+    singles = sum(1 for count in counts.values() if count == 1)
+    high_cards = sum(1 for rank in counts if RANK_ORDER[rank] >= RANK_ORDER["A"])
+    return (group_count, singles, high_cards)
+
+
+def _follow_play_score(cards: list[str], hand: list[str], context: PlayContext) -> tuple[int, int, int, int, int]:
+    pattern = analyze_play(cards)
+    remaining = list(hand)
+    for card in cards:
+        remaining.remove(card)
+    groups, singles, high_cards = _remaining_hand_score(remaining)
+    bombs_used = 1 if pattern.kind in {"bomb", "rocket"} else 0
+    threat_seat = context.last_play_seat
+    threat_cards = context.hand_counts.get(threat_seat, 99) if threat_seat is not None else 99
+    aggressive = threat_seat is not None and not _is_teammate(context, threat_seat) and threat_cards <= 2
+    finish_bonus = -20 if not remaining else 0
+    if aggressive:
+        return (bombs_used, finish_bonus, groups, singles, -pattern.primary_value)
+    return (bombs_used, finish_bonus, groups, singles, high_cards + pattern.primary_value)
+
+
+def _lead_play_score(cards: list[str], hand: list[str], context: PlayContext | None) -> tuple[int, int, int, int, int]:
+    pattern = analyze_play(cards)
+    remaining = list(hand)
+    for card in cards:
+        remaining.remove(card)
+    groups, singles, high_cards = _remaining_hand_score(remaining)
+    bomb_penalty = 3 if pattern.kind in {"bomb", "rocket"} and remaining else 0
+    pattern_rank = {
+        "airplane_pair": 0,
+        "airplane_single": 1,
+        "airplane": 2,
+        "pair_straight": 3,
+        "straight": 4,
+        "triple_pair": 5,
+        "triple_single": 6,
+        "triple": 7,
+        "pair": 8,
+        "single": 9,
+        "four_two_pair": 10,
+        "four_two_single": 11,
+        "bomb": 12,
+        "rocket": 13,
+    }.get(pattern.kind, 99)
+    pressure_bonus = 0
+    if context is not None:
+        next_seat = 1 if context.seat == 3 else context.seat + 1
+        if not _is_teammate(context, next_seat) and context.hand_counts.get(next_seat, 99) <= 2:
+            pressure_bonus = -2 if pattern.kind not in {"single", "pair"} else 0
+    return (bomb_penalty, groups, singles, pattern_rank + pressure_bonus, high_cards + pattern.primary_value)
+
+
+def choose_basic_bid(hand: list[str], current_highest: int = 0) -> int:
+    counts = Counter(card_rank(card) for card in hand)
+    score = 0
+    for rank, count in counts.items():
+        value = RANK_ORDER[rank]
+        if value >= RANK_ORDER["2"]:
+            score += 2 + count
+        elif value >= RANK_ORDER["A"]:
+            score += 2
+        elif value >= RANK_ORDER["K"]:
+            score += 1
+        if count == 4:
+            score += 4
+        elif count == 3:
+            score += 2
+    if {"BJ", "RJ"} <= set(counts):
+        score += 4
+    longest_pair_chain = max((count for count in counts.values() if count >= 2), default=0)
+    triple_count = sum(1 for count in counts.values() if count >= 3)
+    score += triple_count
+    if longest_pair_chain >= 2:
+        score += 1
+
+    target_bid = 0
+    if score >= 15:
+        target_bid = 3
+    elif score >= 11:
+        target_bid = 2
+    elif score >= 7:
+        target_bid = 1
+
+    if target_bid <= current_highest:
+        return 0
+    if current_highest == 2 and target_bid == 3:
+        return 3
+    if current_highest == 1 and target_bid >= 2:
+        return 2 if target_bid == 2 else 3
+    if current_highest == 0:
+        return target_bid
+    return 0
+
+
+def choose_basic_play(
+    hand: list[str],
+    previous: CardPattern | None = None,
+    *,
+    context: PlayContext | None = None,
+) -> list[str] | None:
+    legal_plays = generate_legal_plays(hand, previous)
+    if not legal_plays:
+        return None
+    if len(legal_plays) == 1:
+        return legal_plays[0]
+
+    winning = [cards for cards in legal_plays if len(cards) == len(hand)]
+    if winning:
+        return min(winning, key=lambda cards: _candidate_priority(cards, previous))
+
+    if previous is not None and context is not None and _is_teammate(context, context.last_play_seat):
+        teammate_cards_left = context.hand_counts.get(context.last_play_seat or -1, 99)
+        if teammate_cards_left > 2:
+            return None
+        urgent_plays = [cards for cards in legal_plays if len(hand) - len(cards) <= 2]
+        if urgent_plays:
+            return min(urgent_plays, key=lambda cards: _follow_play_score(cards, hand, context))
+        return None
+
+    if previous is None:
+        return min(legal_plays, key=lambda cards: _lead_play_score(cards, hand, context))
+
+    non_bombs = [cards for cards in legal_plays if analyze_play(cards).kind not in {"bomb", "rocket"}]
+    if context is not None and context.last_play_seat is not None:
+        threat_cards = context.hand_counts.get(context.last_play_seat, 99)
+        last_is_enemy = not _is_teammate(context, context.last_play_seat)
+        if last_is_enemy and threat_cards > 2 and non_bombs:
+            legal_plays = non_bombs
+        elif not last_is_enemy and non_bombs:
+            legal_plays = non_bombs
+    elif non_bombs:
+        legal_plays = non_bombs
+
+    if context is None:
+        return min(legal_plays, key=lambda cards: _candidate_priority(cards, previous))
+    return min(legal_plays, key=lambda cards: _follow_play_score(cards, hand, context))
 
 
 @dataclass
