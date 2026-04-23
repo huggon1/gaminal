@@ -157,6 +157,12 @@ class MinesweeperCoreTests(unittest.TestCase):
         self.assertNotIn("]", plain)
         self.assertEqual(len(plain.splitlines()), 4)
 
+    def test_compact_board_layout_is_used_for_narrow_width(self) -> None:
+        app = LocalMinesweeperApp(GameConfig(rows=9, cols=30, mines=10))
+
+        self.assertTrue(app.should_render_compact_board(width=60))
+        self.assertFalse(app.should_render_compact_board(width=180))
+
     def test_preset_difficulties_and_custom_configs_are_resolved(self) -> None:
         beginner = resolve_config()
         custom = resolve_config("expert", rows=10, cols=12, mines=20)
