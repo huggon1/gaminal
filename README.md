@@ -9,6 +9,8 @@ This repository now holds independent game projects at the root.
 - [bluff-cards](./bluff-cards/README.md)
 - [minesweeper](./minesweeper/README.md)
 - [point24](./point24/README.md)
+- [game-2048](./game-2048/README.md)
+- [snake](./snake/README.md)
 
 ## Usage
 
@@ -44,4 +46,17 @@ uv run python -m minesweeper --difficulty expert --theme stealth
 cd point24
 uv sync
 uv run python -m point24 --theme modern
+```
+
+
+```bash
+cd game-2048
+uv sync
+uv run python -m game_2048 --theme modern
+```
+
+```bash
+cd snake
+uv sync
+uv run python -m snake --theme stealth
 ```
