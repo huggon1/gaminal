@@ -108,7 +108,8 @@ class TypingSession:
             now = time.monotonic()
             self.start_time = now
             self._last_sample = now
-        self.current_input += char
+        if len(self.current_input) < len(self.current_word):
+            self.current_input += char
 
     def backspace(self) -> None:
         if self.finished or not self.current_input:

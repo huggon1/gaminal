@@ -17,6 +17,7 @@ A collection of terminal games built with Python and [Textual](https://github.co
 | [racing](./racing/README.md) | Single-player | Corridor racer: stay in the drifting gap, collect coins, gap narrows |
 | [breakout](./breakout/README.md) | Single-player | Ball-and-paddle brick breaker, 3 lives |
 | [fishing](./fishing/README.md) | Single-player | Stardew Valley-style fishing minigame with optional 2-lane mode |
+| [rapid-roll](./rapid-roll/README.md) | Single-player | Nokia-style falling ball survival: land on platforms, collect bonuses |
 
 ## Requirements
 

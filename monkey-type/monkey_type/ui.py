@@ -16,7 +16,7 @@ from .words import WORDS
 
 _EXTRA_CSS = """
 #words-panel {
-    height: 7;
+    height: 12;
     border: round #3a5a9c;
     background: #0a1828;
     padding: 1 2;
@@ -29,7 +29,7 @@ _EXTRA_CSS = """
 }
 
 #main-stats-panel {
-    height: 1fr;
+    height: 5;
     border: round #46659f;
     background: #0d1627;
     padding: 0 1;
@@ -60,6 +60,7 @@ _EXTRA_CSS = """
 
 _SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
 _BAR_BLOCKS = " ▁▂▃▄▅▆▇█"
+_VISIBLE_WORD_LINES = 5
 
 
 def _build_line_layout(words: list[str], target_width: int = 65) -> tuple[list[list[int]], dict[int, int]]:
@@ -207,17 +208,18 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
 
     def render_words_panel(self) -> Text:
         if self.session.finished:
-            return self._render_results_summary()
+            return self._render_history_chart("words-panel")
 
         current_line = self._word_to_line.get(self.session.current_word_idx, 0)
-        start_line = max(0, min(current_line - 1, max(0, len(self._line_layout) - 3)))
-        visible = self._line_layout[start_line : start_line + 3]
+        max_start = max(0, len(self._line_layout) - _VISIBLE_WORD_LINES)
+        start_line = max(0, min(current_line - 1, max_start))
+        visible = self._line_layout[start_line : start_line + _VISIBLE_WORD_LINES]
 
         text = Text()
-        for row in range(3):
+        for row in range(_VISIBLE_WORD_LINES):
             if row < len(visible):
                 text.append_text(self._render_line(visible[row]))
-            if row < 2:
+            if row < _VISIBLE_WORD_LINES - 1:
                 text.append("\n")
         return text
 
@@ -256,14 +258,14 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
 
     def render_main_stats_panel(self) -> Text:
         if self.session.finished:
-            return self._render_history_chart()
+            return self._render_results_summary()
 
         text = Text()
         if not self.session.started:
             text.append("Type to start\n", style="bold")
             text.append(self._mode_label(), style="bright_cyan")
             text.append("  ")
-            text.append("3 visible lines  Space confirms word", style="dim")
+            text.append("5 visible lines  Space confirms word", style="dim")
             return text
 
         text.append("wpm ", style="dim")
@@ -361,17 +363,15 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
         text = Text()
         shared = min(len(word), len(typed))
         for idx in range(shared):
-            style = "bright_white" if typed[idx] == word[idx] else "bold red on red"
+            style = "bright_white" if typed[idx] == word[idx] else "bold bright_red underline"
             text.append(typed[idx], style=style)
-        if len(typed) > shared:
-            text.append(typed[shared:], style="bold red")
         if len(typed) < len(word):
             cursor = len(typed)
             text.append(word[cursor], style="underline white")
             if cursor + 1 < len(word):
                 text.append(word[cursor + 1 :], style="dim white")
-        else:
-            text.append(" ", style="underline white")
+        elif word:
+            text.stylize("underline white", len(word) - 1, len(word))
         return text
 
     def _render_results_summary(self) -> Text:
@@ -393,9 +393,9 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
         text.append(str(len(self.session.completed)), style="bright_white")
         return text
 
-    def _render_history_chart(self) -> Text:
+    def _render_history_chart(self, widget_id: str) -> Text:
         values = self._history_snapshot()
-        chart_width = max(8, self._panel_inner_width("main-stats-panel", 52) - 7)
+        chart_width = max(8, self._panel_inner_width(widget_id, 52) - 7)
         samples = _resample(values, chart_width)
         if not samples:
             samples = [0.0]
@@ -403,7 +403,7 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
         avg = sum(samples) / len(samples)
         peak = max(samples)
         max_value = max(10.0, peak)
-        chart_height = 8
+        chart_height = max(3, min(6, self._panel_inner_height(widget_id, 9) - 3))
 
         text = Text()
         text.append("WPM history\n", style="bold")
@@ -432,8 +432,6 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
         text.append(f"{self._peak_wpm():.1f}", style="bright_green")
         text.append("  consistency ", style="dim")
         text.append(f"{self.session.consistency():.1f}%", style="bright_white")
-        text.append("\n")
-        text.append("[Tab] new test  [q] quit", style="dim")
         return text
 
     def _history_snapshot(self) -> list[float]:
@@ -471,6 +469,13 @@ class MonkeyTypeApp(ThemedApp, inherit_bindings=False):
         except Exception:
             return fallback
         return max(10, widget.size.width - 2)
+
+    def _panel_inner_height(self, widget_id: str, fallback: int) -> int:
+        try:
+            widget = self.query_one(f"#{widget_id}", Static)
+        except Exception:
+            return fallback
+        return max(4, widget.size.height - 4)
 
     def _mode_label(self) -> str:
         if self.duration > 0:
